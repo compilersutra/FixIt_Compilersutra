@@ -129,7 +129,7 @@ A stricter compiler and new types do not delete human error. They move it. Split
   - `free(p)` then `printf("%s", p)` (use memory after it is gone)
   - write `a[10]` on an array of size 4 (past the end)
 - **Rust app developer**: can write [`unsafe`](https://doc.rust-lang.org/book/ch19-01-unsafe-rust.html), lie to the type system, or pass a bad length into C
-- **gcc/g++ developer**: can miss a warning, ship bad codegen, or an optimizer bug
+- **gcc / g++ / clang developer**: can miss a warning, ship bad codegen, or an optimizer bug
 - **rustc developer**: can ship a [soundness bug](https://conf.researchr.org/details/issta-2026/issta-2026-research-papers/129/Rust-s-Type-Checker-Implementation-is-Unsound-An-Empirical-Study-on-Soundness-Bugs-i) (accept code they should reject)
 
 Same species. Features only help if the app developer uses the safe default (Rust) or the safe API (C++ `v.at(i)`, not `v[i]`).
@@ -137,12 +137,12 @@ Same species. Features only help if the app developer uses the safe default (Rus
 The useful question is not who is smarter. It is **what each language gives you to find the mess**:
 
 - default rustc: language rules on
-- default gcc/g++: those rules off
+- default gcc / g++ / clang: those rules off
 - C++ features you choose: `at()`, `span`, smart pointers
 - sanitizers: if you pass the flag and run that path
 - [Miri](https://github.com/rust-lang/miri): after rustc already said ok, for rustc holes
 
-Let’s look at examples I compiled with rustc 1.93.1 and gcc/g++ 13.3. Full output is in [What I compiled](#what-i-compiled) and [C++23, sanitizers, Boost, crates](#c23-sanitizers-boost-crates).
+Let’s look at examples I compiled with rustc 1.93.1, gcc/g++ 13.3, and **clang/clang++ 18.1.3**. Full output is in [What I compiled](#what-i-compiled) and [C++23, sanitizers, Boost, crates](#c23-sanitizers-boost-crates).
 
 **Example 1.** This function makes a `String` on the stack, then tries to hand a pointer to it back to the caller:
 
@@ -167,7 +167,7 @@ error[E0515]: cannot return reference to local variable `s`
 
 No binary. That reject is the good outcome.
 
-In C you can `free(p)` then `printf("%s", p)`: gcc warns `-Wuse-after-free` and still links. In C++ you can keep a `string_view` after `delete`: g++ 13.3 said nothing and still linked. Those programs can crash, print garbage, or read data an attacker put in the reused heap.
+In C you can `free(p)` then `printf("%s", p)`: gcc warns `-Wuse-after-free` and still links. **clang 18.1.3** with `-Wall -Wextra` said **nothing** and still linked. In C++ you can keep a `string_view` after `delete`: g++ 13.3 and clang++ 18 both said nothing and still linked. Those programs can crash, print garbage, or read data an attacker put in the reused heap.
 
 Same C, with a sanitizer:
 
@@ -177,6 +177,11 @@ $ ./uaf_c_asan
 ERROR: AddressSanitizer: heap-use-after-free
 SUMMARY: AddressSanitizer: heap-use-after-free ... in printf_common
 # abort, exit 1
+
+$ clang -O0 -Wall -Wextra -fsanitize=address uaf.c -o uaf_clang_asan
+$ ./uaf_clang_asan
+ERROR: AddressSanitizer: heap-use-after-free
+SUMMARY: AddressSanitizer: heap-use-after-free ... in printf_common
 ```
 
 C++ `string_view` after `delete`, ASan: `heap-use-after-free` in `fwrite`, abort. So yes: **a sanitizer can report the same class of bug Rust refused.** You had to rebuild with `-fsanitize=address` and actually run `main`. rustc never let a binary out.
@@ -190,7 +195,7 @@ fn main() {
 }
 ```
 
-What it is doing: valid indexes are 0, 1, 2, 3. Index 10 is six slots past the end. In C and C++ that write is undefined behavior: smash the stack, overwrite a return address, or look fine until it does not. gcc and g++ 13.3 with `-Wall -Wextra` built it with no diagnostic.
+What it is doing: valid indexes are 0, 1, 2, 3. Index 10 is six slots past the end. In C and C++ that write is undefined behavior: smash the stack, overwrite a return address, or look fine until it does not. gcc and g++ 13.3 with `-Wall -Wextra` built it with **no diagnostic**. clang and clang++ 18 warned `-Warray-bounds` and **still linked**.
 
 What rustc did (default):
 
@@ -212,6 +217,10 @@ Same C with UBSan (ASan alone did not print a clean stack-overflow report on thi
 $ gcc -O0 -Wall -Wextra -fsanitize=undefined oob.c -o oob_ubsan
 $ ./oob_ubsan
 oob.c:3:6: runtime error: index 10 out of bounds for type 'int [4]'
+
+$ clang -O0 -Wall -Wextra -fsanitize=undefined oob.c -o oob_clang_ubsan
+# also -Warray-bounds at compile time, then:
+oob.c:3:5: runtime error: index 10 out of bounds for type 'int[4]'
 ```
 
 Again: the sanitizer can name the same bug. Default gcc still shipped a binary. Default rustc did not.
@@ -259,6 +268,11 @@ $ gcc -O0 -Wall -Wextra slice_i.c -o slice_i_c    # exit 0, no warning
 $ ./slice_i_c 4
 still running  a[0]=0  flag=42
 # exit 0
+
+$ clang -O0 -Wall -Wextra slice_i.c -o slice_i_clang
+$ ./slice_i_clang 4
+still running  a[0]=0  flag=42
+# exit 0: same smash
 ```
 
 `flag` started as `7`. After `a[4] = 42` it is `42`. The program kept going. That is the unsafe failure.
@@ -269,6 +283,13 @@ Now the sanitizer: this is the honest part. ASan + UBSan, **defaults**:
 $ gcc -O0 -Wall -Wextra -fsanitize=address,undefined slice_i.c -o slice_i_san
 $ ./slice_i_san 4
 slice_i.c:12:8: runtime error: index 4 out of bounds for type 'int [4]'
+still running  a[0]=0  flag=42
+# exit 0
+
+$ clang -O0 -Wall -Wextra -fsanitize=address,undefined slice_i.c -o slice_i_clang_san
+$ ./slice_i_clang_san 4
+slice_i.c:12:5: runtime error: index 4 out of bounds for type 'int[4]'
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior ...
 still running  a[0]=0  flag=42
 # exit 0
 ```
@@ -342,21 +363,21 @@ flowchart TB
 
 ## What I compiled
 
-Same computer. **rustc 1.93.1** (`01f6ddf75`, 2026-02-11). **gcc/g++ 13.3.0**. Flags: `-Wall -Wextra` for C and C++. No AddressSanitizer. Commands:
+Same computer. **rustc 1.93.1** (`01f6ddf75`, 2026-02-11). **gcc/g++ 13.3.0**. **clang/clang++ 18.1.3**. Flags: `-Wall -Wextra` for C and C++. No AddressSanitizer unless I say so. Commands:
 
 ```bash
-gcc  -Wall -Wextra uaf.c  -o uaf_c     # exit 0
-g++  -std=c++20 -Wall -Wextra uaf.cpp -o uaf_cpp  # exit 0
-rustc uaf.rs -o uaf_rs                 # error, no binary
+gcc    -Wall -Wextra uaf.c  -o uaf_c       # exit 0, warns -Wuse-after-free
+clang  -Wall -Wextra uaf.c  -o uaf_clang   # exit 0, no warning
+g++    -std=c++20 -Wall -Wextra uaf.cpp -o uaf_cpp      # exit 0, silent
+clang++ -std=c++20 -Wall -Wextra uaf.cpp -o uaf_clangpp # exit 0, silent
+rustc uaf.rs -o uaf_rs                     # error, no binary
 
-gcc  -Wall -Wextra oob.c  -o oob_c     # exit 0
-g++  -std=c++20 -Wall -Wextra oob.cpp -o oob_cpp  # exit 0
-rustc oob.rs -o oob_rs                 # error, no binary
+gcc    -Wall -Wextra oob.c  -o oob_c       # exit 0, no diagnostic
+clang  -Wall -Wextra oob.c  -o oob_clang   # exit 0, -Warray-bounds, still a binary
+rustc oob.rs -o oob_rs                     # error, no binary
 
-gcc  -O0 -Wall -Wextra slice_i.c -o slice_i_c   # exit 0
-rustc slice_i.rs -o slice_i_rs                  # exit 0 (index is a variable)
-./slice_i_rs 4                                  # panic, exit 101
-./slice_i_c 4                                   # still running, flag smashed
+clang -O0 -Wall -Wextra slice_i.c -o slice_i_clang
+./slice_i_clang 4                          # still running, flag smashed
 ```
 
 ### 1. Use memory after free
@@ -388,7 +409,13 @@ uaf.c:6:5: note: call to ‘free’ here
 # exit code 0: you still get a binary
 ```
 
-**Why that is bad.** `free` gave the heap block back. `printf` still reads it. The bytes may be garbage, may crash, or may be data an attacker put there after reuse. gcc saw the bug and **still linked**. A warning is not a stop.
+```text
+$ clang -Wall -Wextra uaf.c -o uaf_clang
+# no diagnostic
+# exit code 0
+```
+
+**Why that is bad.** `free` gave the heap block back. `printf` still reads it. The bytes may be garbage, may crash, or may be data an attacker put there after reuse. gcc saw the bug and **still linked**. clang 18 with `-Wall -Wextra` did not even warn. A warning is not a stop.
 
   </TabItem>
   <TabItem value="cxx" label="C++: no warning">
@@ -406,11 +433,11 @@ int main() {
 
 ```text
 $ g++ -std=c++20 -Wall -Wextra uaf.cpp -o uaf_cpp
-# no output
-# exit code 0: binary produced
+$ clang++ -std=c++20 -Wall -Wextra uaf.cpp -o uaf_clangpp
+# both: no output, exit 0, binary produced
 ```
 
-**Why that is bad.** `string_view` is only a pointer plus length. After `delete s`, those bytes are dead. Printing `v` is use-after-free. g++ 13.3 did not even warn. You can ship this.
+**Why that is bad.** `string_view` is only a pointer plus length. After `delete s`, those bytes are dead. Printing `v` is use-after-free. g++ 13.3 and clang++ 18 did not even warn. You can ship this.
 
   </TabItem>
   <TabItem value="rs" label="Rust: no binary">
@@ -436,12 +463,12 @@ error: aborting due to 1 previous error
 
 **What rustc did.** `s` dies at the end of `dangling`. The `&s` would point at dead memory. rustc refused. **No object file, no binary.**
 
-**Why that reject is good.** You cannot run this program. You cannot put it in a release. The same class of bug that gcc warned-and-linked, and g++ silently linked, never leaves the compiler. That is the memory-safety claim in one command.
+**Why that reject is good.** You cannot run this program. You cannot put it in a release. The same class of bug that gcc warned-and-linked, clang silently linked, and g++/clang++ silently linked, never leaves rustc. That is the memory-safety claim in one command.
 
   </TabItem>
 </Tabs>
 
-What surprised me was C++, not Rust. g++ made a binary and said nothing. gcc at least warned, then still linked. Tools like AddressSanitizer can catch the C/C++ bugs **if you turn them on**. I did not turn them on. The slogan is about the normal build, not the special test build.
+What surprised me was C++, not Rust. g++ and clang++ made a binary and said nothing. gcc at least warned, then still linked. clang 18 did not warn on the `free` then `printf` case. Tools like AddressSanitizer can catch the C/C++ bugs **if you turn them on**. I did not turn them on for the default builds. The slogan is about the normal build, not the special test build.
 
 ### 2. Write past the array
 
@@ -460,9 +487,15 @@ int main(void) {
 $ gcc -Wall -Wextra oob.c -o oob_c
 # no diagnostic
 # exit code 0
+
+$ clang -Wall -Wextra oob.c -o oob_clang
+oob.c:3:5: warning: array index 10 is past the end of the array (that has type 'int[4]') [-Warray-bounds]
+    3 |     a[10] = 42;
+      |     ^ ~~
+# exit code 0: you still get a binary
 ```
 
-**Why that is bad.** The array has four `int`s. Index 10 is six slots past the end. In C that is undefined behavior: smash the stack, overwrite a return address, or “work” until it does not. gcc 13.3 with `-Wall -Wextra` still built it.
+**Why that is bad.** The array has four `int`s. Index 10 is six slots past the end. In C that is undefined behavior: smash the stack, overwrite a return address, or “work” until it does not. gcc 13.3 with `-Wall -Wextra` still built it with no warning. clang 18 warned, then **still linked**. rustc refused.
 
   </TabItem>
   <TabItem value="cxx" label="C++: still builds">
@@ -477,11 +510,13 @@ int main() {
 
 ```text
 $ g++ -std=c++20 -Wall -Wextra oob.cpp -o oob_cpp
-# no diagnostic
-# exit code 0
+# no diagnostic, exit 0
+
+$ clang++ -std=c++20 -Wall -Wextra oob.cpp -o oob_clangpp
+# -Warray-bounds, exit 0, binary produced
 ```
 
-**Why that is bad.** Same write. Same undefined behavior. Same silent binary.
+**Why that is bad.** Same write. Same undefined behavior. gcc silent. clang warns. Both ship a binary.
 
   </TabItem>
   <TabItem value="rs" label="Rust: no binary">
@@ -663,6 +698,16 @@ $ ASAN_OPTIONS=detect_leaks=0 ./toctou_c_asan
 check: is_reg=1 size=6
 use: read "secret"
 # exit 0: ASan has nothing to say
+
+$ clang -Wall -Wextra toctou.c -o toctou_clang
+$ ./toctou_clang
+check: is_reg=1 size=6
+use: read "secret"
+$ clang -O0 -Wall -Wextra -fsanitize=address toctou.c -o toctou_clang_asan
+$ ASAN_OPTIONS=detect_leaks=0 ./toctou_clang_asan
+check: is_reg=1 size=6
+use: read "secret"
+# exit 0
 ```
 
   </TabItem>
@@ -684,7 +729,7 @@ People also point at “out of memory, process dies” or “program panics” a
 
 ## C++23, sanitizers, Boost, crates
 
-The first tests used C arrays and `new`/`delete`. That is a fair “default C++ still lets you” demo. It is not a fair “C++ has no tools” demo. So I ran the same bugs again with **C++23**, **std::span**, **std::vector**, and [AddressSanitizer](https://github.com/google/sanitizers/wiki/AddressSanitizer). Compiler: **g++ 13.3**, `-std=c++23`. Rust: **rustc 1.93.1** (current `stable` on this machine). I did not get a newer rustc; `rustup update` is how you would.
+The first tests used C arrays and `new`/`delete`. That is a fair “default C++ still lets you” demo. It is not a fair “C++ has no tools” demo. So I ran the same bugs again with **C++23**, **std::span**, **std::vector**, and [AddressSanitizer](https://github.com/google/sanitizers/wiki/AddressSanitizer). Compilers: **g++ 13.3** and **clang++ 18.1.3**, `-std=c++23`. Rust: **rustc 1.93.1**.
 
 **What C++23 did not change.** `std::span` is a pointer plus a length, like a Rust slice type, but `span[i]` does **not** check `i` in the default operator. I compiled this:
 
@@ -703,9 +748,12 @@ int main(int argc, char** argv) {
 
 ```text
 $ g++ -std=c++23 -O0 -Wall -Wextra cxx23_span.cpp -o cxx23_span
-# exit 0, no warning
+$ clang++ -std=c++23 -O0 -Wall -Wextra cxx23_span.cpp -o cxx23_span_clang
+# both: exit 0, no warning
 $ ./cxx23_span 4
 still running  s[0]=0
+$ ./cxx23_span_clang 4
+still running  s[0]=0 v.size()=4
 # exit 0
 ```
 
@@ -720,6 +768,11 @@ ERROR: AddressSanitizer: heap-buffer-overflow
 WRITE of size 4
 SUMMARY: AddressSanitizer: heap-buffer-overflow ... in main
 # abort, exit 1
+
+$ clang++ -std=c++23 -O0 -Wall -Wextra -fsanitize=address cxx23_span.cpp -o cxx23_span_clang_asan
+$ ./cxx23_span_clang_asan 4
+ERROR: AddressSanitizer: heap-buffer-overflow
+SUMMARY: AddressSanitizer: heap-buffer-overflow ... in main
 ```
 
 The `string_view` after `delete` program from test 1, still C++23:
@@ -893,7 +946,7 @@ When someone says “Rust solved memory safety,” I now ask: safe code or kerne
 
 ## Limits
 
-The small C/C++/Rust programs and #25860 were run on rustc 1.93.1 and gcc/g++ 13.3 on one machine. C++23 tests used `-std=c++23`; ASan used `-fsanitize=address`. #25860 is still open. ISSTA numbers come from the public abstract and artifact; I did not invent extra stats. uutils notes come from Canonical’s 2026 post, the Zellic PDF, and oss-security, not “every Rust CLI is clean.” Docs search and compile speed change every release.
+The small C/C++/Rust programs and #25860 were run on rustc 1.93.1, gcc/g++ 13.3, and clang/clang++ 18.1.3 on one machine. C++23 tests used `-std=c++23`; ASan used `-fsanitize=address`. #25860 is still open. ISSTA numbers come from the public abstract and artifact; I did not invent extra stats. uutils notes come from Canonical’s 2026 post, the Zellic PDF, and oss-security, not “every Rust CLI is clean.” Docs search and compile speed change every release.
 
 C and Rust can live together. People are still the expensive part. Checking more at compile time is a bet that computers got cheaper faster than human attention. I just wanted the extra words on the claim written down.
 
