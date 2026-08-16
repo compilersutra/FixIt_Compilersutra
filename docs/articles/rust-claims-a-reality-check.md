@@ -919,7 +919,7 @@ The interesting difference between Rust and C++ is not whether safety tools exis
 
 Rust did not delete the need for correctness. It moved a big piece of it into the type system. Memory safety is a floor, not the whole building.
 
-## Limits
+## How I ran this
 
 The small C/C++/Rust programs and #25860 were run on rustc 1.93.1, gcc/g++ 13.3, and clang/clang++ 18.1.3 on one machine. C++23 tests used `-std=c++23`; ASan used `-fsanitize=address`. #25860 is still open. ISSTA numbers come from the public abstract and artifact; I did not invent extra stats. uutils notes come from Canonical’s 2026 post, the Zellic PDF, and oss-security, not “every Rust CLI is clean.” Docs search and compile speed change every release.
 
