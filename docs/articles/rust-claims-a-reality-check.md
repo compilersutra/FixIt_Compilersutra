@@ -62,6 +62,10 @@ import Head from '@docusaurus/Head';
 
 # Rust Claims, a Reality Check: What rustc Proves, and Where the Proof Stops
 
+:::tip In short
+Safe Rust rejects use-after-free, constant out-of-bounds, and data races at compile time. Runtime out-of-bounds **panics by default** (`debug` and `--release`), unless LLVM can *prove* the index is in range — that elision does not weaken the rule. C and C++ need sanitizers or wrappers (`v.at(i)`, `span::at`) for the same class of bug; those are opt-in. `unsafe`, FFI, rustc/LLVM bugs, and logic errors sit outside that bubble.
+:::
+
 :::note
 Related: [Rust vs Modern C++](/docs/articles/rust-vs-modern-cpp-memory-safety-beyond-the-hype) · [How rustc compiles vs C++](/docs/articles/rustc-pipeline-vs-cpp-compilation-pipeline)
 
@@ -70,7 +74,9 @@ This piece is for people who already know what a use-after-free is and care wher
 
 People say **Rust is memory safe**. I wanted the compiler version of that sentence, not the slide. So I compiled the same bugs with rustc 1.93.1, gcc/g++ 13.3, and clang 18, then asked where the proof stops: language, rustc, LLVM, or the OS.
 
-C++ already has `unique_ptr`, `span`, `v.at(i)`, sanitizers. The interesting difference is **what happens when the programmer forgets to use them.** Rust’s normal `v[i]` is checked. C++’s normal `v[i]` is not. Safety-critical C++ often uses `span::at` / GSL / custom wrappers; those are still a choice, not the language default. On the Rust side, LLVM may **elide** a bounds check it can prove, and `no_std` still panics (or `abort`) unless you wrote `get_unchecked` — the check is not a `std`-only extra.
+**The default index is the comparison.** In safe Rust, `v[i]` is the checked operation. In C++, `v[i]` / `span[i]` is the unchecked one; `v.at(i)` / `span::at` / GSL are extra. Safety-critical C++ often uses those extras. They remain a choice. `#![no_std]` still has the check in `core` unless you wrote `get_unchecked`.
+
+C++ already has `unique_ptr`, `span`, sanitizers. The interesting difference is **what happens when the programmer forgets to use them.**
 
 The claim is real. It is also smaller than “Rust is memory safe.”
 
@@ -101,22 +107,21 @@ The claim is real. It is also smaller than “Rust is memory safe.”
 Evidence is below. Three different index stories, say them once:
 
 1. **Constant index rustc can see** → compile-time rejection. No binary.
-2. **Runtime index** → rustc emits a bounds check → **panic** (defined). Not C undefined behavior. A later LLVM pass may drop the check if it proves `i` in range.
+2. **Runtime index** → rustc emits a bounds check → **panic** (defined). Not C undefined behavior. `--release` does **not** strip that check. LLVM may drop it only when it can **statically prove** `i` is in range. That is proving the access safe, not relaxing the language.
 3. **`unsafe { *v.get_unchecked(i) }`** → you hold the proof. Broken invariant is UB. Use this in a hot loop only after you have a local proof (length already tested, iterator already in range).
 
 ## Table of Contents
 
 - [The short answer](#the-short-answer)
 - [Three levels of Rust safety](#three-levels-of-rust-safety)
-- [What the borrow checker actually proves](#what-the-borrow-checker-actually-proves)
-- [The same bug in C, C++, and Rust](#the-same-bug-in-c-c-and-rust)
+- [Ownership: static proof vs leftover pointer](#ownership-static-proof-vs-leftover-pointer)
 - [Data races](#data-races)
 - [What I compiled](#what-i-compiled)
 - [C++23 and sanitizers](#c23-and-sanitizers)
 - [`unsafe` is a proof boundary](#unsafe-is-a-proof-boundary)
+- [Checklist](#checklist)
 - [From borrow checking to LLVM](#from-borrow-checking-to-llvm)
 - [Limits of rustc](#limits-of-rustc)
-- [Checklist](#checklist)
 - [What you pay for the checks](#what-you-pay-for-the-checks)
 - [The claim I would actually make](#the-claim-i-would-actually-make)
 - [How I ran this](#how-i-ran-this)
@@ -179,8 +184,6 @@ What it is doing: valid indexes are 0, 1, 2, 3. Index 10 is six slots past the e
 
 What rustc did (default): compile error, `deny(unconditional_panic)`, no binary.
 
-gcc/g++ 13.3 with `-Wall -Wextra` produced a binary with no diagnostic. clang/clang++ 18 warned `-Warray-bounds` and still produced a binary.
-
 <details>
 <summary>UBSan on the same C source</summary>
 
@@ -218,7 +221,7 @@ index out of bounds: the len is 4 but the index is 4
 # exit 101: never prints "still running"
 ```
 
-Same with `rustc -O`. Bounds checks stay unless LLVM can prove `i` in range. Valid index `0` prints `still running, a[0]=42`.
+Same with `rustc -O` / `--release`. The panic stayed. LLVM did not remove the check: it could not prove `i` in range. Valid index `0` prints `still running, a[0]=42`.
 
 C: `i` from argv, array of 4, neighbor `flag`. `./slice_i_c 4` printed `still running` and `flag` went from 7 to 42 (gcc and clang, `-O0 -Wall -Wextra`). Default UBSan printed the OOB message and **continued**; ASan often misses this intra-object overflow. `-fno-sanitize-recover=undefined` aborts — extra flag. Rust panic needed none.
 
@@ -265,30 +268,11 @@ This is the compiler article’s spine. **Memory-safety as a language model** is
 
 The rest of the article fills that list with programs.
 
-## What the borrow checker actually proves
+## Ownership: static proof vs leftover pointer
 
-People say the borrow checker “prevents memory bugs.” True, and incomplete. It does **not** watch machine code. It checks ownership, lifetimes, and aliases **before** LLVM.
+Two different questions, one hole.
 
-```rust
-fn use_string() {
-    let s = String::from("hello");
-    let r = &s;
-    println!("{}", r);
-}
-```
-
-`s` owns the heap `String`. `r` only borrows. rustc’s rule is: **owner lives at least as long as the borrow.**
-
-Move the owner first:
-
-```rust
-fn example() {
-    let s = String::from("hello");
-    let r = &s;
-    drop(s);
-    println!("{}", r);
-}
-```
+**Borrow checker = static proof before a binary exists.** It does not watch machine code. It checks ownership, lifetimes, and aliases **before** LLVM. Rule: the owner lives at least as long as the borrow.
 
 ```text
 s owns memory
@@ -297,18 +281,12 @@ s owns memory
           |
           +---- s is destroyed
                     |
-                    X  r is still alive
+                    X  r is still alive  →  rustc reject (Example 1, E0515)
 ```
 
-I compiled that shape as [Example 1](#the-short-answer) (`&s` returned from the function). rustc: `E0515`. No binary.
+ASan asks: “did this **run** access dead memory?” The borrow checker asks: “can this program even **name** that relationship?”
 
-ASan asks: “did this **run** access dead memory?” The borrow checker asks: “can this program even **name** that relationship?” Sanitizer: observe an execution. Borrow checker: reject the program.
-
-Safe `v[100]` on a length-3 `Vec` is **not** C undefined behavior. rustc emits a bounds check; miss → **panic** (defined stop). C `v[100]` on `int v[3]` is UB: the optimizer may assume it never happens. `unsafe` is the second Rust path: broken contract → UB.
-
-## The same bug in C, C++, and Rust
-
-One hole, three spellings. Allocate an `int`, free it, write through the old pointer.
+**Same hole if the compiler emits a binary.** C `free(p)` only marks the heap free; the **variable** `p` is still a number you can store through. rustc’s `Box` **owns** the `i32`. `drop(p)` **moves** that owner. After the move there is no pointer left (`E0382`).
 
 <Tabs groupId="same-uaf">
   <TabItem value="c" label="C: still a binary">
@@ -316,7 +294,7 @@ One hole, three spellings. Allocate an `int`, free it, write through the old poi
 ```c
 int *p = malloc(sizeof(int));
 free(p);
-*p = 42;   /* gcc: -Wuse-after-free, then links */
+*p = 42;   /* gcc: -Wuse-after-free, then a binary */
 ```
 
   </TabItem>
@@ -340,24 +318,15 @@ fn main() {
 ```
 
 ```text
-$ rustc drop.rs
 error[E0382]: use of moved value: `p`
- --> drop.rs:4:5
-  |
-2 |     let mut p = Box::new(10);
-  |         ----- move occurs because `p` has type `Box<i32>`
-3 |     drop(p);
-  |          - value moved here
-4 |     *p = 42;
-  |     ^^^^^^^ value used here after move
 ```
 
   </TabItem>
 </Tabs>
 
-**Why rustc rejects this**, not “because Rust is safer” as a slogan. `Box` **owns** the heap `i32`. `drop(p)` **moves** that owner into `drop`. After the move, `p` is gone. There is no pointer left to write. C `free(p)` only marks the heap free; the **variable** `p` is still a number you can store through. That is the language rule, not a smarter programmer.
+That is the language rule, not a smarter programmer. Full `String` / `string_view` logs: [What I compiled](#what-i-compiled).
 
-The longer `String` / `string_view` demos in [What I compiled](#what-i-compiled) are the same rule with more bytes.
+Bounds are a different check: safe `v[100]` on a length-3 `Vec` is a **panic**, not C UB. `--release` does not turn it into UB. LLVM may omit the instruction only after a static proof that the index fits.
 
 ## Data races
 
@@ -773,9 +742,9 @@ ERROR: AddressSanitizer: heap-buffer-overflow
 
 C++23 `string_view` after `delete` printed `secret` (exit 0). With ASan: `heap-use-after-free`, abort.
 
-C++23 + ASan caught both **at run time**, if you pass the flag and **run the path**. rustc’s check on `&s` / `a[10]` is compile time with no extra flag. The variable-index panic is in every binary, debug or `-O`.
+C++23 + ASan caught both **at run time**, if you pass the flag and **run the path**. rustc’s check on `&s` / `a[10]` is compile time with no extra flag. The variable-index panic is in every binary I built, including `-O`. `--release` is not an “unchecked indexing” mode.
 
-[`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at) / `span::at` throw `out_of_range` — closer to Rust `v[i]`. The usual C++ spelling is still unchecked `v[i]` / `span[i]`. Rust’s usual spelling is the checked one; LLVM may drop the check when it proves the index. Unchecked Rust is `unsafe { *v.get_unchecked(i) }`.
+[`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at) / `span::at` throw `out_of_range`. That is closer to Rust `v[i]`, and it is still **opt-in**. Default C++ `s[i]` is unchecked. Default Rust `v[i]` is checked. LLVM may omit a Rust check only after it proves the index fits.
 
 Boost became a lot of `std`; the rest of the kitchen sink is crates.io on the Rust side. Trusting a crate is the same problem as trusting Boost. Neither makes `span[i]` check bounds by default.
 
@@ -801,6 +770,30 @@ pub fn as_static(s: &str) -> &'static str {
 
 “Our crate has no `unsafe`” is incomplete: `Cargo.lock` may pull crates that do. `cargo audit` finds **known** advisories; it does not prove libraries correct.
 
+## Checklist
+
+:::tip Use this when you write `unsafe` or FFI
+Four questions on the block, then `get_unchecked` only with a local proof. Full list below.
+:::
+
+**`unsafe` block (write this in a comment above the block):**
+
+1. What invariant am I asserting? (non-null, aligned, `len` is the allocation, no alias with `&mut`, lifetime not `'static` unless it really is)
+2. Who established it — this function, the caller, or C?
+3. What would make it false on the next line?
+4. Can Miri run this path in CI?
+
+**`get_unchecked`:** only after a local proof (`i < v.len()`, or an iterator that already walked the slice). If the proof is “I think the loop is fine,” keep `v[i]`.
+
+**FFI / C++ interop:**
+
+- Treat every `extern "C"` length and pointer as untrusted until you copy into a `Vec` / checked slice.
+- Do not `from_raw_parts` on a C “success” that can be null + len 0 unless the C API documents that as empty.
+- Prefer owning the allocation on one side. If C frees, Rust must not `Drop` the same bytes.
+- On the C++ side: `unique_ptr` / `span::at` at the boundary; sanitizers on the C++ test binary, not only on the Rust crate.
+
+**Filesystem:** open once; `fstat` / operate on the fd; `O_NOFOLLOW` if the path must not be a symlink.
+
 ## From borrow checking to LLVM
 
 Safe Rust is only as strong as rustc. If rustc **accepts an invalid program**, the language said no and the implementation said yes. LLVM then optimizes as if the type were true. That is a miscompile of the *language*, not a random backend crash.
@@ -811,9 +804,13 @@ source → AST → HIR → type check → borrow check → MIR → LLVM IR → m
 
 Ownership is checked **before** LLVM. `&mut` is not “any C pointer”; rustc can lower it as `noalias`. If rustc **wrongly** emits `&'static`, LLVM may treat that pointer as forever. A hole in lifetime rules is permission for the optimizer.
 
+Bounds checks in MIR are the same story: `--release` is not a switch that deletes them. LLVM may omit a check only when it can prove the index is in range. That is a proof of safety, not a weaker language.
+
 The guarantee is not “the borrow checker is perfect.” It is: **the whole pipeline preserves the language’s safety rules.** rustc and LLVM are two later steps on that list.
 
 The [pipeline article](/docs/articles/rustc-pipeline-vs-cpp-compilation-pipeline) draws the C++ side.
+
+The sections above assume rustc is correct. rustc is software too. Here is a real case where it is not.
 
 ## Limits of rustc
 
@@ -823,7 +820,7 @@ Yusung Sim, Sukyoung Ryu (KAIST), Jaemin Hong (UNIST), [Rust's Type Checker Impl
 
 Three compiler-bug kinds: crash; reject good code; **accept bad code** (soundness). The last can hide UAF behind `cargo build` with no `unsafe`. Liu et al. (OOPSLA 2025) [[7]](#references) counted rustc bugs more broadly; ISSTA looks at type (3). Study set: abstract **23**, artifact **30** (plus 7 from Liu).
 
-Hard cases: implied bounds, trait objects, associated types — not `Vec` indexing. [#25860](https://github.com/rust-lang/rust/issues/25860) (2015) [[2]](#references) is the long example. [Miri](https://github.com/rust-lang/miri) [[9]](#references) can catch some that blow up at run time. The [compiler guide](https://rustc-dev-guide.rust-lang.org/traits/implied-bounds.html) lists #25860, [#84591](https://github.com/rust-lang/rust/issues/84591), [#100051](https://github.com/rust-lang/rust/issues/100051). C and C++ also lack a full machine spec of “must reject.” Rust’s short sentence needs rustc to be right.
+Hard cases: implied bounds, trait objects, associated types — not `Vec` indexing. The previous demos (`Vec`, `Box`, `a[i]`) assume rustc implements those rules. Below is a program with **no** `unsafe` that rustc 1.93.1 still accepted.
 
 ### The file I compiled (#25860)
 
@@ -849,27 +846,7 @@ pub fn as_static<T: ?Sized>(x: &T) -> &'static T {
 }
 ```
 
-I compiled this with **rustc 1.93.1**. It accepted it. I dropped a `String`, allocated something the same size, then read the “forever” string. Debug build stopped inside a copy check. Release printed zeros. Normal `Vec` code is not this file. This is a rustc limit, not a `Vec` gotcha.
-
-## Checklist
-
-**`unsafe` block (write this in a comment above the block):**
-
-1. What invariant am I asserting? (non-null, aligned, `len` is the allocation, no alias with `&mut`, lifetime not `'static` unless it really is)
-2. Who established it — this function, the caller, or C?
-3. What would make it false on the next line?
-4. Can Miri run this path in CI?
-
-**`get_unchecked`:** only after a local proof (`i < v.len()`, or an iterator that already walked the slice). If the proof is “I think the loop is fine,” keep `v[i]`.
-
-**FFI / C++ interop:**
-
-- Treat every `extern "C"` length and pointer as untrusted until you copy into a `Vec` / checked slice.
-- Do not `from_raw_parts` on a C “success” that can be null + len 0 unless the C API documents that as empty.
-- Prefer owning the allocation on one side. If C frees, Rust must not `Drop` the same bytes.
-- On the C++ side: `unique_ptr` / `span::at` at the boundary; sanitizers on the C++ test binary, not only on the Rust crate.
-
-**Filesystem:** open once; `fstat` / operate on the fd; `O_NOFOLLOW` if the path must not be a symlink.
+I compiled this with **rustc 1.93.1**. It accepted it. I dropped a `String`, allocated something the same size, then read the “forever” string. Debug build stopped inside a copy check. Release printed zeros. Normal `Vec` code is not this file. This is a rustc limit, not a `Vec` gotcha. [Miri](https://github.com/rust-lang/miri) [[9]](#references) can catch some of these if they blow up at run time. The [compiler guide](https://rustc-dev-guide.rust-lang.org/traits/implied-bounds.html) lists #25860, [#84591](https://github.com/rust-lang/rust/issues/84591), [#100051](https://github.com/rust-lang/rust/issues/100051).
 
 ## What you pay for the checks
 
