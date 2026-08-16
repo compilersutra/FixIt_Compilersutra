@@ -1,6 +1,6 @@
 ---
 title: "Rust Claims, a Reality Check: Safety, Tools, and Systems Programming"
-description: "What rustc actually proves, how that reaches LLVM, and where the proof stops. Compiled on rustc 1.93.1 vs gcc 13.3 and clang 18."
+description: "Rust's safety guarantees are real, but they stop at unsafe, FFI, compiler bugs, and the OS. Compiled on rustc 1.93.1 vs gcc 13.3 and clang 18."
 keywords:
   - Rust memory safety
   - Rust safety guarantees
@@ -57,7 +57,7 @@ import TabItem from '@theme/TabItem';
 import Head from '@docusaurus/Head';
 
 <Head>
-  <meta name="description" content="Plain English: what 'Rust is memory safe' really means, what it does not cover, and a rustc bug with no unsafe keyword." />
+  <meta name="description" content="Rust's safety guarantees are real, but they stop at unsafe, FFI, compiler bugs, and the OS. Compiler logs included." />
 </Head>
 
 # Rust Claims, a Reality Check: What rustc Proves, and Where the Proof Stops
@@ -94,15 +94,60 @@ The claim is real. It is also smaller than “Rust is memory safe.”
 
 **Results of the programs I compiled** (default flags unless noted: `-Wall -Wextra`, no sanitizer):
 
-| **Bug** | **C/C++ default** | **C/C++ + ASan/UBSan** | **Safe Rust** |
-|:---|:---|:---|:---|
-| Use-after-free | Compiles (gcc may warn; clang often silent) | Runtime abort | Rejected (`E0515` / `E0382`) |
-| Constant OOB (`a[10]` on size 4) | Compiles (clang warns, still links) | Runtime report | Rejected (compile error) |
-| Runtime OOB (`a[i]`) | UB; my run smashed a neighbor `flag` | Often a message; default UBSan still continues | Panic, exit 101 |
-| Data race (`n += 1` from two threads) | Compiles | Tool-dependent | Rejected (`E0499`) |
-| TOCTOU (check path, swap, open) | Compiles; reads the swapped file | ASan silent | Compiles; same wrong file |
-| Bad FFI length / `unsafe` lie | Possible | Not solved | Possible (Level 2–3) |
-| Logic / ignored `Result` | Possible | Not solved | Possible |
+<table>
+<thead>
+<tr>
+<th>Bug</th>
+<th>C/C++ default</th>
+<th>C/C++ + ASan/UBSan</th>
+<th>Safe Rust</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Use-after-free</td>
+<td>Compiles (gcc may warn; clang often silent)</td>
+<td>Runtime abort</td>
+<td>Rejected (<code>E0515</code> / <code>E0382</code>)</td>
+</tr>
+<tr>
+<td>Constant OOB (<code>a[10]</code> on size 4)</td>
+<td>Compiles (clang warns, still links)</td>
+<td>Runtime report</td>
+<td>Rejected (compile error)</td>
+</tr>
+<tr>
+<td>Runtime OOB (<code>a[i]</code>)</td>
+<td>UB; my run smashed a neighbor <code>flag</code></td>
+<td>Often a message; default UBSan still continues</td>
+<td>Panic, exit 101</td>
+</tr>
+<tr>
+<td>Data race (<code>n += 1</code> from two threads)</td>
+<td>Compiles</td>
+<td>Tool-dependent</td>
+<td>Rejected (<code>E0499</code>)</td>
+</tr>
+<tr>
+<td>TOCTOU (check path, swap, open)</td>
+<td>Compiles; reads the swapped file</td>
+<td>ASan silent</td>
+<td>Compiles; same wrong file</td>
+</tr>
+<tr>
+<td>Bad FFI length / <code>unsafe</code> lie</td>
+<td>Possible</td>
+<td>Not solved</td>
+<td>Possible (Level 2–3)</td>
+</tr>
+<tr>
+<td>Logic / ignored <code>Result</code></td>
+<td>Possible</td>
+<td>Not solved</td>
+<td>Possible</td>
+</tr>
+</tbody>
+</table>
 
 Evidence is below. Three different index stories, say them once:
 
@@ -368,9 +413,9 @@ clang -O0 -Wall -Wextra slice_i.c -o slice_i_clang
 ./slice_i_clang 4                          # still running, flag smashed
 ```
 
-The UAF / constant-OOB / runtime-index sources match [the short answer](#the-short-answer). Full listings:
+The UAF / constant-OOB / runtime-index sources match [the short answer](#the-short-answer). [Full sources and compiler logs for tests 1–3](#full-compiler-logs):
 
-<details>
+<details id="full-compiler-logs">
 <summary>Full sources and compiler logs for tests 1–3</summary>
 
 ### 1. Use memory after free
@@ -843,7 +888,7 @@ pub fn as_static<T: ?Sized>(x: &T) -> &'static T {
 }
 ```
 
-I compiled this with **rustc 1.93.1**. It accepted it. I dropped a `String`, allocated something the same size, then read the “forever” string. Debug stopped in **rustc’s own internal copy/sanity check**, not a check I wrote. Release printed zeros. Allocator reuse is not specified; another machine or glibc may print garbage, crash, or look fine. Normal `Vec` code is not this file. This is a rustc limit, not a `Vec` gotcha. [Miri](https://github.com/rust-lang/miri) [[9]](#references) can catch some of these if they blow up at run time. The [compiler guide](https://rustc-dev-guide.rust-lang.org/traits/implied-bounds.html) lists #25860, [#84591](https://github.com/rust-lang/rust/issues/84591), [#100051](https://github.com/rust-lang/rust/issues/100051).
+I compiled this with **rustc 1.93.1**. It accepted it. I dropped a `String`, allocated something the same size, then read the “forever” string. Debug hit a **compiler-internal assertion** (not a check in my source). Release built and ran, printing zeros. Allocator reuse is not specified; another machine or glibc may print garbage, crash, or look fine. Normal `Vec` code is not this file. This is a rustc limit, not a `Vec` gotcha. [Miri](https://github.com/rust-lang/miri) [[9]](#references) can catch some of these if they blow up at run time. The [compiler guide](https://rustc-dev-guide.rust-lang.org/traits/implied-bounds.html) lists #25860, [#84591](https://github.com/rust-lang/rust/issues/84591), [#100051](https://github.com/rust-lang/rust/issues/100051).
 
 ## What you pay for the checks
 
