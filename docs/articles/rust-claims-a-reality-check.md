@@ -74,7 +74,7 @@ This piece is for people who already know what a use-after-free is and care wher
 
 People say **Rust is memory safe**. I wanted the compiler version of that sentence, not the slide. So I compiled the same bugs with rustc 1.93.1, gcc/g++ 13.3, and clang 18, then asked where the proof stops: language, rustc, LLVM, or the OS.
 
-**The default index is the comparison.** In safe Rust, `v[i]` is the checked operation. In C++, `v[i]` / `span[i]` is the unchecked one; `v.at(i)` / `span::at` / GSL are extra. Safety-critical C++ often uses those extras. They remain a choice. `#![no_std]` still has the check in `core` unless you wrote `get_unchecked`.
+**The default index is the comparison.** In safe Rust, `v[i]` is checked and **panics** on a miss. In C++, `v[i]` / `span[i]` is unchecked; `v.at(i)` / `span::at` **throw** — defined, but opt-in. `#![no_std]` still checks in `core` unless you wrote `get_unchecked`.
 
 C++ already has `unique_ptr`, `span`, sanitizers. The interesting difference is **what happens when the programmer forgets to use them.**
 
@@ -94,8 +94,8 @@ The claim is real. It is also smaller than “Rust is memory safe.”
 
 **Results of the programs I compiled** (default flags unless noted: `-Wall -Wextra`, no sanitizer):
 
-| Bug | C/C++ default | C/C++ + ASan/UBSan | Safe Rust |
-|---|---|---|---|
+| **Bug** | **C/C++ default** | **C/C++ + ASan/UBSan** | **Safe Rust** |
+|:---|:---|:---|:---|
 | Use-after-free | Compiles (gcc may warn; clang often silent) | Runtime abort | Rejected (`E0515` / `E0382`) |
 | Constant OOB (`a[10]` on size 4) | Compiles (clang warns, still links) | Runtime report | Rejected (compile error) |
 | Runtime OOB (`a[i]`) | UB; my run smashed a neighbor `flag` | Often a message; default UBSan still continues | Panic, exit 101 |
@@ -113,7 +113,7 @@ Evidence is below. Three different index stories, say them once:
 ## Table of Contents
 
 - [The short answer](#the-short-answer)
-- [Three levels of Rust safety](#three-levels-of-rust-safety)
+- [Where the language guarantee ends](#where-the-language-guarantee-ends)
 - [Ownership: static proof vs leftover pointer](#ownership-static-proof-vs-leftover-pointer)
 - [Data races](#data-races)
 - [What I compiled](#what-i-compiled)
@@ -124,7 +124,6 @@ Evidence is below. Three different index stories, say them once:
 - [Limits of rustc](#limits-of-rustc)
 - [What you pay for the checks](#what-you-pay-for-the-checks)
 - [The claim I would actually make](#the-claim-i-would-actually-make)
-- [How I ran this](#how-i-ran-this)
 - [References](#references)
 
 ## The short answer
@@ -244,27 +243,25 @@ still running  a[0]=0  flag=42
 
 Sanitizers can name the same bugs. They are a flag you pass and a path you must run. Safe Rust’s reject/panic is the default. C does not mark `a[i] = 42` as `unsafe`. rustc bugs and FFI still sit outside that default; those sections come later.
 
-## Three levels of Rust safety
+## Where the language guarantee ends
 
-The slide says “Rust.” That is several products glued together.
+The slide says “Rust.” That is several products glued together. **Memory-safety as a language model** is not the same as **an implementation bug in rustc.**
 
-**Level 1: safe Rust.** No `unsafe` in *your* function. rustc checks ownership, lifetimes, aliases, and (for `a[i]`) whether the index fits.
+**Level 1: safe Rust.** No `unsafe` in *your* function. Ownership, borrows, bounds, data-race rules — if rustc is sound.
 
-**Level 2: `unsafe`.** You told rustc to trust you. Callers still see a safe type. The proof is a human.
+**Level 2: `unsafe`.** You assume the invariant. Callers still see a safe type.
 
-**Level 3: FFI + the toolchain.** C libraries, ABI, file descriptors, `mmap`, rustc itself, LLVM. Language rules stop at `extern "C"`. They also stop if rustc is wrong.
+**Level 3: FFI + the toolchain.** C lengths, ABI, `mmap`, libraries, rustc, LLVM, OS. Language rules stop at `extern "C"`. They also stop if rustc is wrong.
 
-### Where the language guarantee ends
+The numbered list is the same picture, one step finer:
 
-This is the compiler article’s spine. **Memory-safety as a language model** is not the same as **an implementation bug in rustc.**
-
-1. **Safe Rust** — ownership, borrows, bounds, data-race rules (if rustc is sound).
-2. **`unsafe`** — you assume the invariant.
-3. **FFI** — rustc trusts C lengths, pointers, and ABI.
-4. **Library implementation** — `std` and crates contain `unsafe`; `Cargo.lock` is in the TCB.
-5. **rustc** — a soundness bug accepts code the language forbids. That is not “Rust lied”; the *implementation* did. [Limits of rustc](#limits-of-rustc) is that step: ISSTA 2026 [[5]](#references) and [#25860](https://github.com/rust-lang/rust/issues/25860) [[2]](#references).
-6. **LLVM** — optimizes IR it was given (`noalias` on a lie is still “correct” LLVM).
-7. **OS / hardware** — TOCTOU, `mmap`, permissions, cosmic rays.
+1. **Safe Rust**
+2. **`unsafe`**
+3. **FFI**
+4. **Library implementation** (`std` / crates; `Cargo.lock` is in the TCB)
+5. **rustc** — [Limits of rustc](#limits-of-rustc): ISSTA 2026 [[5]](#references), [#25860](https://github.com/rust-lang/rust/issues/25860) [[2]](#references)
+6. **LLVM** (`noalias` on a lie is still “correct” LLVM)
+7. **OS / hardware** — TOCTOU, permissions
 
 The rest of the article fills that list with programs.
 
@@ -354,7 +351,7 @@ Safe Rust wants `Arc<Mutex<i32>>` or an `AtomicUsize`. Deadlock, starvation, and
 
 ## What I compiled
 
-Same computer. **rustc 1.93.1** (`01f6ddf75`, 2026-02-11). **gcc/g++ 13.3.0**. **clang/clang++ 18.1.3**. Flags: `-Wall -Wextra` for C and C++. No AddressSanitizer unless I say so. Commands:
+Same computer. **rustc 1.93.1** (`01f6ddf75`, 2026-02-11). **gcc/g++ 13.3.0**. **clang/clang++ 18.1.3**. Flags: `-Wall -Wextra` for C and C++. C++23 tests: `-std=c++23`. ASan: `-fsanitize=address`. ISSTA counts are from the public abstract and artifact. uutils notes are Canonical / Zellic / oss-security, not “every Rust CLI is clean.”
 
 ```bash
 gcc    -Wall -Wextra uaf.c  -o uaf_c       # exit 0, warns -Wuse-after-free
@@ -744,7 +741,7 @@ C++23 `string_view` after `delete` printed `secret` (exit 0). With ASan: `heap-u
 
 C++23 + ASan caught both **at run time**, if you pass the flag and **run the path**. rustc’s check on `&s` / `a[10]` is compile time with no extra flag. The variable-index panic is in every binary I built, including `-O`. `--release` is not an “unchecked indexing” mode.
 
-[`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at) / `span::at` throw `out_of_range`. That is closer to Rust `v[i]`, and it is still **opt-in**. Default C++ `s[i]` is unchecked. Default Rust `v[i]` is checked. LLVM may omit a Rust check only after it proves the index fits.
+[`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at) / `span::at` throw `std::out_of_range`. Rust `v[i]` **panics**. Both are defined stops. Rust’s stop is the default index; C++’s throw is opt-in. LLVM may omit a Rust check only after it proves the index fits.
 
 Boost became a lot of `std`; the rest of the kitchen sink is crates.io on the Rust side. Trusting a crate is the same problem as trusting Boost. Neither makes `span[i]` check bounds by default.
 
@@ -846,7 +843,7 @@ pub fn as_static<T: ?Sized>(x: &T) -> &'static T {
 }
 ```
 
-I compiled this with **rustc 1.93.1**. It accepted it. I dropped a `String`, allocated something the same size, then read the “forever” string. Debug build stopped inside a copy check. Release printed zeros. Normal `Vec` code is not this file. This is a rustc limit, not a `Vec` gotcha. [Miri](https://github.com/rust-lang/miri) [[9]](#references) can catch some of these if they blow up at run time. The [compiler guide](https://rustc-dev-guide.rust-lang.org/traits/implied-bounds.html) lists #25860, [#84591](https://github.com/rust-lang/rust/issues/84591), [#100051](https://github.com/rust-lang/rust/issues/100051).
+I compiled this with **rustc 1.93.1**. It accepted it. I dropped a `String`, allocated something the same size, then read the “forever” string. Debug stopped in **rustc’s own internal copy/sanity check**, not a check I wrote. Release printed zeros. Allocator reuse is not specified; another machine or glibc may print garbage, crash, or look fine. Normal `Vec` code is not this file. This is a rustc limit, not a `Vec` gotcha. [Miri](https://github.com/rust-lang/miri) [[9]](#references) can catch some of these if they blow up at run time. The [compiler guide](https://rustc-dev-guide.rust-lang.org/traits/implied-bounds.html) lists #25860, [#84591](https://github.com/rust-lang/rust/issues/84591), [#100051](https://github.com/rust-lang/rust/issues/100051).
 
 ## What you pay for the checks
 
@@ -894,13 +891,9 @@ I would not write: “Rust makes programs memory safe.” Too broad. I would wri
 
 The interesting difference between Rust and C++ is not whether safety tools exist. It is **what happens when the programmer forgets to use them.**
 
-Rust did not delete the need for correctness. It moved a big piece of it into the type system. Memory safety is a floor, not the whole building.
+Rust did not delete the need for correctness. It moved a big piece of it into the type system. Memory safety is a floor, not the whole building. C and Rust can live together. Checking more at compile time is a bet that computers got cheaper faster than human attention.
 
-## How I ran this
-
-The small C/C++/Rust programs and #25860 were run on rustc 1.93.1, gcc/g++ 13.3, and clang/clang++ 18.1.3 on one machine. C++23 tests used `-std=c++23`; ASan used `-fsanitize=address`. #25860 is still open. ISSTA numbers come from the public abstract and artifact; I did not invent extra stats. uutils notes come from Canonical’s 2026 post, the Zellic PDF, and oss-security, not “every Rust CLI is clean.” Docs search and compile speed change every release.
-
-C and Rust can live together. People are still the expensive part. Checking more at compile time is a bet that computers got cheaper faster than human attention. I just wanted the extra words on the claim written down.
+All runs used the versions and flags in [What I compiled](#what-i-compiled). #25860 is still open.
 
 ## References
 
