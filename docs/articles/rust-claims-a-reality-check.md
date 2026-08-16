@@ -1,6 +1,6 @@
 ---
 title: "Rust Claims, a Reality Check: Safety, Tools, and Systems Programming"
-description: "Rust's safety guarantees are real, but they stop at unsafe, FFI, compiler bugs, and the OS. Compiled on rustc 1.93.1 vs gcc 13.3 and clang 18."
+description: "Rust's safety guarantees are real, but they stop at unsafe, FFI, compiler bugs, and the OS. Compiler logs and a practical checklist."
 keywords:
   - Rust memory safety
   - Rust safety guarantees
@@ -57,13 +57,13 @@ import TabItem from '@theme/TabItem';
 import Head from '@docusaurus/Head';
 
 <Head>
-  <meta name="description" content="Rust's safety guarantees are real, but they stop at unsafe, FFI, compiler bugs, and the OS. Compiler logs included." />
+  <meta name="description" content="Rust's safety guarantees are real, but they stop at unsafe, FFI, compiler bugs, and the OS. Compiler logs and a practical checklist." />
 </Head>
 
 # Rust Claims, a Reality Check: What rustc Proves, and Where the Proof Stops
 
 :::tip In short
-Safe Rust rejects use-after-free, constant out-of-bounds, and data races at compile time. Runtime out-of-bounds **panics by default** (`debug` and `--release`), unless LLVM can *prove* the index is in range — that elision does not weaken the rule. C and C++ need sanitizers or wrappers (`v.at(i)`, `span::at`) for the same class of bug; those are opt-in. `unsafe`, FFI, rustc/LLVM bugs, and logic errors sit outside that bubble.
+Safe Rust rejects use-after-free, constant out-of-bounds, and data races at compile time. Runtime out-of-bounds **panics by default** (`debug` and `--release`), unless LLVM can *prove* the index is in range — that elision does not weaken the rule. C and C++ need sanitizers or wrappers (`v.at(i)`; C++26 `span::at`; GSL) for the same class of bug; those are opt-in. `unsafe`, FFI, rustc/LLVM bugs, and logic errors sit outside that bubble.
 :::
 
 :::note
@@ -74,7 +74,7 @@ This piece is for people who already know what a use-after-free is and care wher
 
 People say **Rust is memory safe**. I wanted the compiler version of that sentence, not the slide. So I compiled the same bugs with rustc 1.93.1, gcc/g++ 13.3, and clang 18, then asked where the proof stops: language, rustc, LLVM, or the OS.
 
-**The default index is the comparison.** In safe Rust, `v[i]` is checked and **panics** on a miss. In C++, `v[i]` / `span[i]` is unchecked; `v.at(i)` / `span::at` **throw** — defined, but opt-in. `#![no_std]` still checks in `core` unless you wrote `get_unchecked`.
+**The default index is the comparison.** In safe Rust, `v[i]` is checked and **panics** on a miss. In C++, `v[i]` / `span[i]` is unchecked. `v.at(i)` **throws** (C++98 onward for `vector`). [`span::at`](https://en.cppreference.com/w/cpp/container/span/at) is **C++26**, not C++23. Until then, checked span access is GSL or a project wrapper. `#![no_std]` still checks in `core` unless you wrote `get_unchecked`.
 
 C++ already has `unique_ptr`, `span`, sanitizers. The interesting difference is **what happens when the programmer forgets to use them.**
 
@@ -769,7 +769,7 @@ Panic / OOM are still bugs. They are not [`strcpy`](https://en.cppreference.com/
 
 Default C++ still lets you `new`/`delete` and `v[i]`. C++ also has tools. I re-ran the bugs with **C++23**, `std::span`, `std::vector`, and [ASan](https://github.com/google/sanitizers/wiki/AddressSanitizer) (`g++` 13.3 / `clang++` 18.1.3, `-std=c++23`).
 
-`operator[]` on `std::span` does **not** check `i`. `span::at` does (throws), same split as `vector`. Safety-critical code often uses `at()`, GSL `span`, or a project wrapper. Default `s[i]` on a length-4 vector still wrote past the end in my C++23 build:
+`operator[]` on `std::span` does **not** check `i`. A bounds-checked [`span::at`](https://en.cppreference.com/w/cpp/container/span/at) is **C++26** (P2821). My tests used `-std=c++23`, so that member was not in the language I compiled. In C++23, safety-critical code uses [`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at), [GSL `span`](https://github.com/microsoft/GSL), or a project wrapper. Default `s[i]` on a length-4 vector still wrote past the end in my C++23 build:
 
 ```text
 $ g++ -std=c++23 -O0 -Wall -Wextra cxx23_span.cpp -o cxx23_span
@@ -786,9 +786,9 @@ C++23 `string_view` after `delete` printed `secret` (exit 0). With ASan: `heap-u
 
 C++23 + ASan caught both **at run time**, if you pass the flag and **run the path**. rustc’s check on `&s` / `a[10]` is compile time with no extra flag. The variable-index panic is in every binary I built, including `-O`. `--release` is not an “unchecked indexing” mode.
 
-[`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at) / `span::at` throw `std::out_of_range`. Rust `v[i]` **panics**. Both are defined stops. Rust’s stop is the default index; C++’s throw is opt-in. LLVM may omit a Rust check only after it proves the index fits.
+[`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at) throws `std::out_of_range`. Rust `v[i]` **panics**. Both are defined stops. Rust’s stop is the default index; C++’s throw is opt-in. C++26 `span::at` matches `vector::at`. LLVM may omit a Rust check only after it proves the index fits.
 
-Boost became a lot of `std`; the rest of the kitchen sink is crates.io on the Rust side. Trusting a crate is the same problem as trusting Boost. Neither makes `span[i]` check bounds by default.
+Many Boost features moved into `std`. The rest of that kitchen sink is crates.io on the Rust side. Trusting a crate is the same problem as trusting a Boost module. Neither makes C++23 `span[i]` check bounds by default.
 
 ## `unsafe` is a proof boundary
 
@@ -832,7 +832,7 @@ Four questions on the block, then `get_unchecked` only with a local proof. Full 
 - Treat every `extern "C"` length and pointer as untrusted until you copy into a `Vec` / checked slice.
 - Do not `from_raw_parts` on a C “success” that can be null + len 0 unless the C API documents that as empty.
 - Prefer owning the allocation on one side. If C frees, Rust must not `Drop` the same bytes.
-- On the C++ side: `unique_ptr` / `span::at` at the boundary; sanitizers on the C++ test binary, not only on the Rust crate.
+- On the C++ side: `unique_ptr` / `vector::at` (C++26: `span::at`) at the boundary; sanitizers on the C++ test binary, not only on the Rust crate.
 
 **Filesystem:** open once; `fstat` / operate on the fd; `O_NOFOLLOW` if the path must not be a symlink.
 
@@ -957,7 +957,7 @@ Claims in the article point here: rustc soundness and #25860 (2–9); uutils / G
 11. Canonical, [An update on rust-coreutils](https://discourse.ubuntu.com/t/an-update-on-rust-coreutils/80773); [Zellic audit PDF](https://github.com/Zellic/publications/blob/master/uutils%20coreutils%20-%20Zellic%20Audit%20Report.pdf); [oss-security CVE list](https://www.openwall.com/lists/oss-security/2026/05/02/2).
 12. [CVE-2026-35344](https://github.com/advisories/GHSA-wh8p-h9hw-x2mc). [CVE-2026-56392](https://osv.dev/vulnerability/CVE-2026-56392); [CERT Polska on GNU coreutils](https://cert.pl/en/posts/2026/07/CVE-2026-56391/).
 13. [TOCTOU](https://en.wikipedia.org/wiki/Time-of-check_to_time-of-use); Rust [`std::fs`](https://doc.rust-lang.org/std/fs/); [FFI](https://doc.rust-lang.org/nomicon/ffi.html); [panic](https://doc.rust-lang.org/book/ch09-01-unrecoverable-errors-with-panic.html); [`strcpy`](https://en.cppreference.com/w/c/string/byte/strcpy); [undefined behavior (C)](https://en.cppreference.com/w/c/language/behavior).
-14. [AddressSanitizer](https://github.com/google/sanitizers/wiki/AddressSanitizer); [UBSan](https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html); [`std::span`](https://en.cppreference.com/w/cpp/container/span); [`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at); [Boost](https://www.boost.org/); [crates.io](https://crates.io/).
+14. [AddressSanitizer](https://github.com/google/sanitizers/wiki/AddressSanitizer); [UBSan](https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html); [`std::span`](https://en.cppreference.com/w/cpp/container/span); [`span::at` (C++26)](https://en.cppreference.com/w/cpp/container/span/at); [`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at); [Boost](https://www.boost.org/); [crates.io](https://crates.io/).
 15. rustdoc [Search](https://doc.rust-lang.org/nightly/rustdoc/read-documentation/search.html); [#19190](https://github.com/rust-lang/rust/issues/19190).
 16. [Parallel Front End (2026)](https://rust-lang.github.io/rust-project-goals/2026/parallel-front-end.html); Nethercote, [July 2026](https://nnethercote.github.io/2026/07/31/how-to-speed-up-the-rust-compiler-in-july-2026.html).
 17. [cargo-dist](https://github.com/axodotdev/cargo-dist), [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), [rust-streaming](https://github.com/emk/rust-streaming).
