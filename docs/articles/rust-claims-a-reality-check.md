@@ -64,11 +64,13 @@ import Head from '@docusaurus/Head';
 
 :::note
 Related: [Rust vs Modern C++](/docs/articles/rust-vs-modern-cpp-memory-safety-beyond-the-hype) · [How rustc compiles vs C++](/docs/articles/rustc-pipeline-vs-cpp-compilation-pipeline)
+
+This piece is for people who already know what a use-after-free is and care where rustc vs LLVM vs the OS sit. The table below is the whole argument. Compiler logs live in collapsible blocks.
 :::
 
 People say **Rust is memory safe**. I wanted the compiler version of that sentence, not the slide. So I compiled the same bugs with rustc 1.93.1, gcc/g++ 13.3, and clang 18, then asked where the proof stops: language, rustc, LLVM, or the OS.
 
-C++ already has `unique_ptr`, `span`, `v.at(i)`, sanitizers. The interesting difference is **what happens when the programmer forgets to use them.** Rust’s normal `v[i]` is checked. C++’s normal `v[i]` is not.
+C++ already has `unique_ptr`, `span`, `v.at(i)`, sanitizers. The interesting difference is **what happens when the programmer forgets to use them.** Rust’s normal `v[i]` is checked. C++’s normal `v[i]` is not. Safety-critical C++ often uses `span::at` / GSL / custom wrappers; those are still a choice, not the language default. On the Rust side, LLVM may **elide** a bounds check it can prove, and `no_std` still panics (or `abort`) unless you wrote `get_unchecked` — the check is not a `std`-only extra.
 
 The claim is real. It is also smaller than “Rust is memory safe.”
 
@@ -99,8 +101,8 @@ The claim is real. It is also smaller than “Rust is memory safe.”
 Evidence is below. Three different index stories, say them once:
 
 1. **Constant index rustc can see** → compile-time rejection. No binary.
-2. **Runtime index** → rustc emits a bounds check → **panic** (defined). Not C undefined behavior.
-3. **`unsafe { *v.get_unchecked(i) }`** → you hold the proof. Broken invariant is UB.
+2. **Runtime index** → rustc emits a bounds check → **panic** (defined). Not C undefined behavior. A later LLVM pass may drop the check if it proves `i` in range.
+3. **`unsafe { *v.get_unchecked(i) }`** → you hold the proof. Broken invariant is UB. Use this in a hot loop only after you have a local proof (length already tested, iterator already in range).
 
 ## Table of Contents
 
@@ -113,11 +115,11 @@ Evidence is below. Three different index stories, say them once:
 - [C++23 and sanitizers](#c23-and-sanitizers)
 - [`unsafe` is a proof boundary](#unsafe-is-a-proof-boundary)
 - [From borrow checking to LLVM](#from-borrow-checking-to-llvm)
-- [A 2026 research paper](#a-2026-research-paper)
-- [Bug #25860, which I compiled](#bug-25860-which-i-compiled)
+- [Limits of rustc](#limits-of-rustc)
+- [Checklist](#checklist)
 - [What you pay for the checks](#what-you-pay-for-the-checks)
 - [The claim I would actually make](#the-claim-i-would-actually-make)
-- [Limits](#limits)
+- [How I ran this](#how-i-ran-this)
 - [References](#references)
 
 ## The short answer
@@ -147,9 +149,10 @@ error[E0515]: cannot return reference to local variable `s`
 
 No binary. That reject is the good outcome.
 
-In C you can `free(p)` then `printf("%s", p)`: gcc warns `-Wuse-after-free` and still links. **clang 18.1.3** with `-Wall -Wextra` said **nothing** and still linked. In C++ you can keep a `string_view` after `delete`: g++ 13.3 and clang++ 18 both said nothing and still linked. Those programs can crash, print garbage, or read data an attacker put in the reused heap.
+In C you can `free(p)` then `printf("%s", p)`: gcc emits `-Wuse-after-free` and still produces a binary. **clang 18.1.3** with `-Wall -Wextra` produced a binary with no warning. In C++ you can keep a `string_view` after `delete`: g++ 13.3 and clang++ 18 both produced a binary with no warning. Those programs can crash, print garbage, or read data an attacker put in the reused heap.
 
-Same C, with a sanitizer:
+<details>
+<summary>ASan on the same C/C++ sources (opt-in rebuild + run)</summary>
 
 ```text
 $ gcc -O0 -Wall -Wextra -fsanitize=address uaf.c -o uaf_c_asan
@@ -157,14 +160,11 @@ $ ./uaf_c_asan
 ERROR: AddressSanitizer: heap-use-after-free
 SUMMARY: AddressSanitizer: heap-use-after-free ... in printf_common
 # abort, exit 1
-
-$ clang -O0 -Wall -Wextra -fsanitize=address uaf.c -o uaf_clang_asan
-$ ./uaf_clang_asan
-ERROR: AddressSanitizer: heap-use-after-free
-SUMMARY: AddressSanitizer: heap-use-after-free ... in printf_common
 ```
 
-C++ `string_view` after `delete`, ASan: `heap-use-after-free` in `fwrite`, abort. So yes: **a sanitizer can report the same class of bug Rust refused.** You had to rebuild with `-fsanitize=address` and actually run `main`. rustc never let a binary out.
+clang 18 with the same flag: same abort. C++ `string_view` after `delete` + ASan: `heap-use-after-free` in `fwrite`, abort. A sanitizer can report the same class of bug rustc refused. You had to rebuild with `-fsanitize=address` [[14]](#references) and actually run `main`. rustc never emitted a binary.
+
+</details>
 
 **Example 2.** This program makes an array of four zeros, then writes index 10:
 
@@ -175,35 +175,24 @@ fn main() {
 }
 ```
 
-What it is doing: valid indexes are 0, 1, 2, 3. Index 10 is six slots past the end. In C and C++ that write is undefined behavior: smash the stack, overwrite a return address, or look fine until it does not. gcc and g++ 13.3 with `-Wall -Wextra` built it with **no diagnostic**. clang and clang++ 18 warned `-Warray-bounds` and **still linked**.
+What it is doing: valid indexes are 0, 1, 2, 3. Index 10 is six slots past the end. In C and C++ that write is undefined behavior: smash the stack, overwrite a return address, or look fine until it does not. gcc and g++ 13.3 with `-Wall -Wextra` built it with **no diagnostic**. clang and clang++ 18 warned `-Warray-bounds` and still produced a binary.
 
-What rustc did (default):
+What rustc did (default): compile error, `deny(unconditional_panic)`, no binary.
 
-```text
-error: this operation will panic at runtime
- --> oob.rs:3:5
-  |
-3 |     a[10] = 42;
-  |     ^^^^^ index out of bounds: the length is 4 but the index is 10
-  |
-  = note: `#[deny(unconditional_panic)]` on by default
-```
+gcc/g++ 13.3 with `-Wall -Wextra` produced a binary with no diagnostic. clang/clang++ 18 warned `-Warray-bounds` and still produced a binary.
 
-No binary.
-
-Same C with UBSan (ASan alone did not print a clean stack-overflow report on this tiny `int a[4]` in my run; UBSan did):
+<details>
+<summary>UBSan on the same C source</summary>
 
 ```text
 $ gcc -O0 -Wall -Wextra -fsanitize=undefined oob.c -o oob_ubsan
 $ ./oob_ubsan
 oob.c:3:6: runtime error: index 10 out of bounds for type 'int [4]'
-
-$ clang -O0 -Wall -Wextra -fsanitize=undefined oob.c -o oob_clang_ubsan
-# also -Warray-bounds at compile time, then:
-oob.c:3:5: runtime error: index 10 out of bounds for type 'int[4]'
 ```
 
-Again: the sanitizer can name the same bug. Default gcc still shipped a binary. Default rustc did not.
+ASan alone did not print a clean report on this tiny stack `int a[4]` in my run; UBSan did. Default gcc still shipped a binary. Default rustc did not.
+
+</details>
 
 **Example 3.** Constant `a[10]` is the easy case. rustc can see the number. Now `i` comes from the command line, so the compiler cannot reject it up front.
 
@@ -229,54 +218,26 @@ index out of bounds: the len is 4 but the index is 4
 # exit 101: never prints "still running"
 ```
 
-Same with `rustc -O`. Bounds checks stay in. Valid index `0` prints `still running, a[0]=42`.
+Same with `rustc -O`. Bounds checks stay unless LLVM can prove `i` in range. Valid index `0` prints `still running, a[0]=42`.
 
-The C side, same idea: `i` from argv, array of 4, a neighbor `flag` sitting right after it:
+C: `i` from argv, array of 4, neighbor `flag`. `./slice_i_c 4` printed `still running` and `flag` went from 7 to 42 (gcc and clang, `-O0 -Wall -Wextra`). Default UBSan printed the OOB message and **continued**; ASan often misses this intra-object overflow. `-fno-sanitize-recover=undefined` aborts — extra flag. Rust panic needed none.
 
-```c
-struct Box {
-    int a[4];
-    int flag;
-};
-int i = atoi(argv[1]);   /* we passed 4 */
-b.a[i] = 42;
-printf("still running  a[0]=%d  flag=%d\n", b.a[0], b.flag);
-```
+<details>
+<summary>C smash + default UBSan recover</summary>
 
 ```text
-$ gcc -O0 -Wall -Wextra slice_i.c -o slice_i_c    # exit 0, no warning
+$ gcc -O0 -Wall -Wextra slice_i.c -o slice_i_c
 $ ./slice_i_c 4
 still running  a[0]=0  flag=42
-# exit 0
 
-$ clang -O0 -Wall -Wextra slice_i.c -o slice_i_clang
-$ ./slice_i_clang 4
-still running  a[0]=0  flag=42
-# exit 0: same smash
-```
-
-`flag` started as `7`. After `a[4] = 42` it is `42`. The program kept going. That is the unsafe failure.
-
-Now the sanitizer: this is the honest part. ASan + UBSan, **defaults**:
-
-```text
 $ gcc -O0 -Wall -Wextra -fsanitize=address,undefined slice_i.c -o slice_i_san
 $ ./slice_i_san 4
 slice_i.c:12:8: runtime error: index 4 out of bounds for type 'int [4]'
 still running  a[0]=0  flag=42
 # exit 0
-
-$ clang -O0 -Wall -Wextra -fsanitize=address,undefined slice_i.c -o slice_i_clang_san
-$ ./slice_i_clang_san 4
-slice_i.c:12:5: runtime error: index 4 out of bounds for type 'int[4]'
-SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior ...
-still running  a[0]=0  flag=42
-# exit 0
 ```
 
-UBSan **printed** the same “index out of bounds” story Rust panics with. Then the program **kept running** and `flag` was still smashed. Default UBSan recovers. ASan did not stop this one: `a[4]` is the next field in the same `struct`, an intra-object overflow sanitizers often miss.
-
-If I add `-fno-sanitize-recover=undefined`, UBSan aborts and does not print `still running`. That flag is extra. Rust’s panic on `a[i]` needed no extra flag.
+</details>
 
 Sanitizers can name the same bugs. They are a flag you pass and a path you must run. Safe Rust’s reject/panic is the default. C does not mark `a[i] = 42` as `unsafe`. rustc bugs and FFI still sit outside that default; those sections come later.
 
@@ -298,7 +259,7 @@ This is the compiler article’s spine. **Memory-safety as a language model** is
 2. **`unsafe`** — you assume the invariant.
 3. **FFI** — rustc trusts C lengths, pointers, and ABI.
 4. **Library implementation** — `std` and crates contain `unsafe`; `Cargo.lock` is in the TCB.
-5. **rustc** — a soundness bug accepts code the language forbids. That is not “Rust lied”; the *implementation* did.
+5. **rustc** — a soundness bug accepts code the language forbids. That is not “Rust lied”; the *implementation* did. [Limits of rustc](#limits-of-rustc) is that step: ISSTA 2026 [[5]](#references) and [#25860](https://github.com/rust-lang/rust/issues/25860) [[2]](#references).
 6. **LLVM** — optimizes IR it was given (`noalias` on a lie is still “correct” LLVM).
 7. **OS / hardware** — TOCTOU, `mmap`, permissions, cosmic rays.
 
@@ -441,6 +402,11 @@ clang -O0 -Wall -Wextra slice_i.c -o slice_i_clang
 ./slice_i_clang 4                          # still running, flag smashed
 ```
 
+The UAF / constant-OOB / runtime-index sources match [the short answer](#the-short-answer). Full listings:
+
+<details>
+<summary>Full sources and compiler logs for tests 1–3</summary>
+
 ### 1. Use memory after free
 
 <Tabs groupId="exp-uaf">
@@ -467,7 +433,7 @@ uaf.c:7:5: warning: pointer ‘p’ used after ‘free’ [-Wuse-after-free]
 uaf.c:6:5: note: call to ‘free’ here
     6 |     free(p);
       |     ^~~~~~~
-# exit code 0: you still get a binary
+# exit code 0: gcc still produces a binary
 ```
 
 ```text
@@ -476,7 +442,7 @@ $ clang -Wall -Wextra uaf.c -o uaf_clang
 # exit code 0
 ```
 
-**Why that is bad.** `free` gave the heap block back. `printf` still reads it. The bytes may be garbage, may crash, or may be data an attacker put there after reuse. gcc saw the bug and **still linked**. clang 18 with `-Wall -Wextra` did not even warn. A warning is not a stop.
+**Why that is bad.** `free` returned the heap block. `printf` still reads it. The bytes may be garbage, may crash, or may be data an attacker put there after reuse. gcc diagnosed it (`-Wuse-after-free`) and still produced a binary. clang 18 with `-Wall -Wextra` did not warn. A warning is not a reject.
 
   </TabItem>
   <TabItem value="cxx" label="C++: no warning">
@@ -529,7 +495,7 @@ error: aborting due to 1 previous error
   </TabItem>
 </Tabs>
 
-What surprised me was C++, not Rust. g++ and clang++ made a binary and said nothing. gcc at least warned, then still linked. clang 18 did not warn on the `free` then `printf` case. Tools like AddressSanitizer can catch the C/C++ bugs **if you turn them on**. I did not turn them on for the default builds. The slogan is about the normal build, not the special test build.
+What surprised me was C++, not Rust. g++ and clang++ produced a binary with no diagnostic. gcc warned, then still produced a binary. clang 18 did not warn on `free` then `printf`. AddressSanitizer can catch these **if you turn it on**. The slogan is about the default build.
 
 ### 2. Write past the array
 
@@ -553,10 +519,10 @@ $ clang -Wall -Wextra oob.c -o oob_clang
 oob.c:3:5: warning: array index 10 is past the end of the array (that has type 'int[4]') [-Warray-bounds]
     3 |     a[10] = 42;
       |     ^ ~~
-# exit code 0: you still get a binary
+# exit code 0: gcc still produces a binary
 ```
 
-**Why that is bad.** The array has four `int`s. Index 10 is six slots past the end. In C that is undefined behavior: smash the stack, overwrite a return address, or “work” until it does not. gcc 13.3 with `-Wall -Wextra` still built it with no warning. clang 18 warned, then **still linked**. rustc refused.
+**Why that is bad.** The array has four `int`s. Index 10 is six slots past the end. In C that is undefined behavior: smash the stack, overwrite a return address, or “work” until it does not. gcc 13.3 with `-Wall -Wextra` still built it with no warning. clang 18 warned, then still produced a binary. rustc refused.
 
   </TabItem>
   <TabItem value="cxx" label="C++: still builds">
@@ -683,6 +649,8 @@ index out of bounds: the len is 4 but the index is 4
   </TabItem>
 </Tabs>
 
+</details>
+
 ### 4. File race (TOCTOU)
 
 You check a file path. Then someone swaps the file. Then you open the path. The compiler does not see that. That bug has a name: [TOCTOU](https://en.wikipedia.org/wiki/Time-of-check_to_time-of-use) (time-of-check to time-of-use). Rust [`std::fs`](https://doc.rust-lang.org/std/fs/) takes paths, like many C programs. Two syscalls on the same path string are two lookups. The file can change in between.
@@ -776,7 +744,7 @@ use: read "secret"
 
 Rust can compile the program, ASan can stay silent, and the program can still use the wrong file. Memory safety is not general security.
 
-The production cousin is [CVE-2026-35359](https://www.openwall.com/lists/oss-security/2026/05/02/2) in Ubuntu’s Rust [uutils](https://github.com/uutils/coreutils) `cp`: check a path, open without `O_NOFOLLOW`, swap a symlink. Canonical / [Zellic](https://github.com/Zellic/publications/blob/master/uutils%20coreutils%20-%20Zellic%20Audit%20Report.pdf) found mostly file races and ignored errors, not a pile of UAF. GNU still shipped a heap overflow: [CVE-2026-56392](https://osv.dev/vulnerability/CVE-2026-56392). Different class, both real. uutils `dd` [CVE-2026-35344](https://github.com/advisories/GHSA-wh8p-h9hw-x2mc) hid a truncate failure with `.ok()`: memory fine, program wrong.
+The production cousin is [CVE-2026-35359](https://www.openwall.com/lists/oss-security/2026/05/02/2) [[11]](#references) in Ubuntu’s Rust [uutils](https://github.com/uutils/coreutils) `cp`. Canonical / [Zellic](https://github.com/Zellic/publications/blob/master/uutils%20coreutils%20-%20Zellic%20Audit%20Report.pdf) found mostly file races and ignored errors, not a pile of UAF. GNU still shipped a heap overflow: [CVE-2026-56392](https://osv.dev/vulnerability/CVE-2026-56392) [[12]](#references). uutils `dd` [CVE-2026-35344](https://github.com/advisories/GHSA-wh8p-h9hw-x2mc) hid a truncate failure with `.ok()`.
 
 Fix for the experiment: open **once**, then `fstat` / operate on the **file descriptor**, or `O_NOFOLLOW`.
 
@@ -790,7 +758,7 @@ Panic / OOM are still bugs. They are not [`strcpy`](https://en.cppreference.com/
 
 Default C++ still lets you `new`/`delete` and `v[i]`. C++ also has tools. I re-ran the bugs with **C++23**, `std::span`, `std::vector`, and [ASan](https://github.com/google/sanitizers/wiki/AddressSanitizer) (`g++` 13.3 / `clang++` 18.1.3, `-std=c++23`).
 
-`span[i]` does **not** check `i`. Same silent write past a vector of length 4:
+`operator[]` on `std::span` does **not** check `i`. `span::at` does (throws), same split as `vector`. Safety-critical code often uses `at()`, GSL `span`, or a project wrapper. Default `s[i]` on a length-4 vector still wrote past the end in my C++23 build:
 
 ```text
 $ g++ -std=c++23 -O0 -Wall -Wextra cxx23_span.cpp -o cxx23_span
@@ -807,7 +775,7 @@ C++23 `string_view` after `delete` printed `secret` (exit 0). With ASan: `heap-u
 
 C++23 + ASan caught both **at run time**, if you pass the flag and **run the path**. rustc’s check on `&s` / `a[10]` is compile time with no extra flag. The variable-index panic is in every binary, debug or `-O`.
 
-[`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at) throws `out_of_range` — closer to Rust `v[i]`. The usual C++ spelling is still unchecked `v[i]` / `span[i]`. Rust’s usual spelling is the checked one. Unchecked Rust is `unsafe { *v.get_unchecked(i) }`.
+[`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at) / `span::at` throw `out_of_range` — closer to Rust `v[i]`. The usual C++ spelling is still unchecked `v[i]` / `span[i]`. Rust’s usual spelling is the checked one; LLVM may drop the check when it proves the index. Unchecked Rust is `unsafe { *v.get_unchecked(i) }`.
 
 Boost became a lot of `std`; the rest of the kitchen sink is crates.io on the Rust side. Trusting a crate is the same problem as trusting Boost. Neither makes `span[i]` check bounds by default.
 
@@ -843,47 +811,23 @@ source → AST → HIR → type check → borrow check → MIR → LLVM IR → m
 
 Ownership is checked **before** LLVM. `&mut` is not “any C pointer”; rustc can lower it as `noalias`. If rustc **wrongly** emits `&'static`, LLVM may treat that pointer as forever. A hole in lifetime rules is permission for the optimizer.
 
-The guarantee is not “the borrow checker is perfect.” It is: **the whole pipeline preserves the language’s safety rules.** Same numbered list as above: language → `unsafe` → FFI → libraries → **rustc** → **LLVM** → OS. ISSTA 2026 and #25860 sit on the rustc step. They are not a gotcha against `Vec`.
+The guarantee is not “the borrow checker is perfect.” It is: **the whole pipeline preserves the language’s safety rules.** rustc and LLVM are two later steps on that list.
 
 The [pipeline article](/docs/articles/rustc-pipeline-vs-cpp-compilation-pipeline) draws the C++ side.
 
-## A 2026 research paper
+## Limits of rustc
 
-Yusung Sim, Sukyoung Ryu (KAIST), Jaemin Hong (UNIST) wrote [Rust's Type Checker Implementation is Unsound](https://conf.researchr.org/details/issta-2026/issta-2026-research-papers/129/Rust-s-Type-Checker-Implementation-is-Unsound-An-Empirical-Study-on-Soundness-Bugs-i) for ISSTA 2026. Extra files: [Zenodo](https://doi.org/10.5281/zenodo.20698055).
+This is step 5 in [where the language guarantee ends](#where-the-language-guarantee-ends). The language model can be sound while **this rustc** accepts a program it should reject. LLVM then treats the lie as IR truth.
 
-This paper is **not** “Rust apps have bugs.” It is “rustc sometimes accepts programs it should reject.”
+Yusung Sim, Sukyoung Ryu (KAIST), Jaemin Hong (UNIST), [Rust's Type Checker Implementation is Unsound](https://conf.researchr.org/details/issta-2026/issta-2026-research-papers/129/Rust-s-Type-Checker-Implementation-is-Unsound-An-Empirical-Study-on-Soundness-Bugs-i) (ISSTA 2026) [[5]](#references), artifact [[6]](#references). Not “Rust apps have bugs.” It is “rustc sometimes accepts programs it should reject.”
 
-Three different compiler bugs:
+Three compiler-bug kinds: crash; reject good code; **accept bad code** (soundness). The last can hide UAF behind `cargo build` with no `unsafe`. Liu et al. (OOPSLA 2025) [[7]](#references) counted rustc bugs more broadly; ISSTA looks at type (3). Study set: abstract **23**, artifact **30** (plus 7 from Liu).
 
-1. rustc **crashes**: annoying, not a memory smash in your app
-2. rustc **rejects good code**: also annoying
-3. rustc **accepts bad code**: this is the soundness bug. This one can hide a use-after-free behind `cargo build` with no `unsafe`
+Hard cases: implied bounds, trait objects, associated types — not `Vec` indexing. [#25860](https://github.com/rust-lang/rust/issues/25860) (2015) [[2]](#references) is the long example. [Miri](https://github.com/rust-lang/miri) [[9]](#references) can catch some that blow up at run time. The [compiler guide](https://rustc-dev-guide.rust-lang.org/traits/implied-bounds.html) lists #25860, [#84591](https://github.com/rust-lang/rust/issues/84591), [#100051](https://github.com/rust-lang/rust/issues/100051). C and C++ also lack a full machine spec of “must reject.” Rust’s short sentence needs rustc to be right.
 
-Another paper (Liu et al., OOPSLA 2025) counted many kinds of rustc bugs. This ISSTA paper looks only at type (3), and compares with Liu.
+### The file I compiled (#25860)
 
-How they built the list: GitHub issues from Jan 2022 to Sep 2025 about types (969) → bug / unsound labels (320) → read by hand (**23**). The short abstract says 23. I almost stopped there. The extra files add 7 more from Liu. Final study set: **30**. I wish the abstract said both numbers.
-
-What they found, in simple words:
-
-- Some of these bugs (often “implied bounds” or trait objects) can break memory safety.
-- Hard cases are associated types and lifetimes mixed with traits: not `Vec` indexing.
-- Many bugs were there from the day the feature shipped. Issue #25860 (2015) is the long example, even though it is older than their 2022–2025 window.
-- **[Miri](https://github.com/rust-lang/miri)** can catch the ones that blow up at run time. Other formal tools (Chalk, a-mir-formality) are not ready as a full test of rustc.
-- The official docs are often not precise enough to use as an automatic test.
-
-Why #25860 can stay open for years: if the rule is not written as a machine-checkable test, you cannot fail rustc with a spec. You fail it with a program plus a human saying “this should not compile.” That is slow.
-
-The [compiler guide](https://rustc-dev-guide.rust-lang.org/traits/implied-bounds.html) already lists this family: #25860, [#84591](https://github.com/rust-lang/rust/issues/84591), [#100051](https://github.com/rust-lang/rust/issues/100051).
-
-C and C++ also do not have a full machine spec of “this must be rejected.” I am not picking on Rust for that. The difference is the **claim**. Rust’s short sentence needs rustc to be right. If tests cannot decide the edge, you have a team process (issues, types team, new solver), not a finished proof.
-
-Normal `HashMap` code is not this set. The set is also not empty. Next is the file I compiled.
-
-## Bug #25860, which I compiled
-
-[#25860](https://github.com/rust-lang/rust/issues/25860) has been open since May 2015. A real fix is waiting on bigger type-system work. [PR #156077](https://github.com/rust-lang/rust/pull/156077) in May 2026 was closed. It did not even build rustc.
-
-The [cve-rs](https://github.com/Speykious/cve-rs) example uses **zero** `unsafe`. A helper that is fine on its own:
+[#25860](https://github.com/rust-lang/rust/issues/25860) is still open. [PR #156077](https://github.com/rust-lang/rust/pull/156077) [[3]](#references) (May 2026) closed without landing. [cve-rs](https://github.com/Speykious/cve-rs) [[4]](#references) uses **zero** `unsafe`:
 
 ```rust
 fn lifetime_translator<'a, 'b, T: ?Sized>(
@@ -905,9 +849,27 @@ pub fn as_static<T: ?Sized>(x: &T) -> &'static T {
 }
 ```
 
-I compiled this with **rustc 1.93.1**. It accepted it. I dropped a `String`, allocated something the same size, then read the “forever” string. Debug build stopped inside a copy check. Release printed zeros. That is when “if it compiled, rustc proved it” died for me. Not for normal `Vec` code. For rustc.
+I compiled this with **rustc 1.93.1**. It accepted it. I dropped a `String`, allocated something the same size, then read the “forever” string. Debug build stopped inside a copy check. Release printed zeros. Normal `Vec` code is not this file. This is a rustc limit, not a `Vec` gotcha.
 
-Normal app code does not look like this. If you start a tools argument with this file, people will say “that is a compiler bug.” They are right. Start with docs search if that is your point. I keep this file because I ran it.
+## Checklist
+
+**`unsafe` block (write this in a comment above the block):**
+
+1. What invariant am I asserting? (non-null, aligned, `len` is the allocation, no alias with `&mut`, lifetime not `'static` unless it really is)
+2. Who established it — this function, the caller, or C?
+3. What would make it false on the next line?
+4. Can Miri run this path in CI?
+
+**`get_unchecked`:** only after a local proof (`i < v.len()`, or an iterator that already walked the slice). If the proof is “I think the loop is fine,” keep `v[i]`.
+
+**FFI / C++ interop:**
+
+- Treat every `extern "C"` length and pointer as untrusted until you copy into a `Vec` / checked slice.
+- Do not `from_raw_parts` on a C “success” that can be null + len 0 unless the C API documents that as empty.
+- Prefer owning the allocation on one side. If C frees, Rust must not `Drop` the same bytes.
+- On the C++ side: `unique_ptr` / `span::at` at the boundary; sanitizers on the C++ test binary, not only on the Rust crate.
+
+**Filesystem:** open once; `fstat` / operate on the fd; `O_NOFOLLOW` if the path must not be a symlink.
 
 ## What you pay for the checks
 
@@ -921,11 +883,7 @@ The guarantee is not free. This is the bill I actually hit.
 - **Layout control.** Packed structs, custom allocators, MMIO: you will touch `unsafe` or stay in C.
 - **No std lending iterator.** A standard `Iterator` cannot yield a borrow from inside itself. Other crates exist ([rust-streaming](https://github.com/emk/rust-streaming)).
 
-Around 2015 some people said: skip the borrow-checker fight, look at the tools. serde, `impl Trait`, `cargo install` got better. The three bullets above (docs search, compile wait, lending iterator) did not vanish.
-
-A May 2023 [forum thread](https://users.rust-lang.org/t/why-are-some-people-against-the-rust-lang/93906) asked why people dislike Rust. Fair replies: a tiny part of a kernel is special CPU instructions; Rust and C can live together; nobody will rewrite a billion lines of old C. In 2026 some Linux kernel code is Rust, most is still C.
-
-Docs search and compile wait are one argument. #25860 is another. Do not mix them.
+A May 2023 [forum thread](https://users.rust-lang.org/t/why-are-some-people-against-the-rust-lang/93906) [[1]](#references): special CPU ops stay in C; mixed trees are normal; nobody rewrites a billion lines. Docs search and compile wait are one argument. #25860 is another.
 
 ## The claim I would actually make
 
