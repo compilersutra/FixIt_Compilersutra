@@ -1,6 +1,6 @@
 ---
 title: "Rust Claims, a Reality Check: Safety, Tools, and Systems Programming"
-description: "A plain-English look at what 'Rust is memory safe' really means: what the compiler stops, what it does not, and a real compiler bug."
+description: "What rustc actually proves, how that reaches LLVM, and where the proof stops. Compiled on rustc 1.93.1 vs gcc 13.3 and clang 18."
 keywords:
   - Rust memory safety
   - Rust safety guarantees
@@ -60,19 +60,17 @@ import Head from '@docusaurus/Head';
   <meta name="description" content="Plain English: what 'Rust is memory safe' really means, what it does not cover, and a rustc bug with no unsafe keyword." />
 </Head>
 
-# Rust Claims, a Reality Check: Safety, Tools, and Systems Programming
+# Rust Claims, a Reality Check: What rustc Proves, and Where the Proof Stops
 
 :::note
 Related: [Rust vs Modern C++](/docs/articles/rust-vs-modern-cpp-memory-safety-beyond-the-hype) · [How rustc compiles vs C++](/docs/articles/rustc-pipeline-vs-cpp-compilation-pipeline)
 :::
 
-People say **Rust is memory safe**. I wanted to know what that actually means. So I compiled small programs, looked at a real Rust project, and read a 2026 paper about bugs in rustc (the Rust compiler).
+People say **Rust is memory safe**. I wanted the compiler version of that sentence, not the slide. So I compiled the same bugs with rustc 1.93.1, gcc/g++ 13.3, and clang 18, then asked where the proof stops: language, rustc, LLVM, or the OS.
 
-This is not “Rust is fake.” It is also not “Rust already fixed everything.” It is: the claim is real, but it is smaller than the short sentence on slides.
+C++ already has `unique_ptr`, `span`, `v.at(i)`, sanitizers. The interesting difference is **what happens when the programmer forgets to use them.** Rust’s normal `v[i]` is checked. C++’s normal `v[i]` is not.
 
-What follows is the **top of the iceberg**: a few programs, a sanitizer flag, one rewrite (uutils), one rustc paper. Under that sit file races, C FFI, `unsafe` in libraries, optimizer rules, and bugs **inside rustc**. Those do not show up on the slide. They still ship.
-
-The rest of the page answers one question: **what does rustc actually prove, how does that reach LLVM, and where does the proof stop?**
+The claim is real. It is also smaller than “Rust is memory safe.”
 
 ```text
                     RUST SAFETY
@@ -80,45 +78,40 @@ The rest of the page answers one question: **what does rustc actually prove, how
         +----------------+----------------+
         |                |                |
    LANGUAGE          TOOLCHAIN        REAL WORLD
-        |                |                |
- ownership          rustc bugs          FFI
- borrowing          LLVM bugs           TOCTOU
- lifetimes          codegen             OS APIs
- bounds             optimizer           unsafe crates
- data races                              logic bugs
-        |                |                |
-        +----------------+----------------+
-                         |
-                         v
-                 WHAT IS ACTUALLY
-                    GUARANTEED?
+ ownership            rustc              FFI
+ borrowing            LLVM               TOCTOU
+ bounds               optimizer          logic / .ok()
+ data races                              OS APIs
 ```
 
-There are three different fights online. Do not mix them.
+**Results of the programs I compiled** (default flags unless noted: `-Wall -Wextra`, no sanitizer):
 
-1. **Memory safety**: can the program smash memory?
-2. **Tools**: is rustc slow? is the docs search bad?
-3. **Systems work**: can you write a kernel, or only small apps?
+| Bug | C/C++ default | C/C++ + ASan/UBSan | Safe Rust |
+|---|---|---|---|
+| Use-after-free | Compiles (gcc may warn; clang often silent) | Runtime abort | Rejected (`E0515` / `E0382`) |
+| Constant OOB (`a[10]` on size 4) | Compiles (clang warns, still links) | Runtime report | Rejected (compile error) |
+| Runtime OOB (`a[i]`) | UB; my run smashed a neighbor `flag` | Often a message; default UBSan still continues | Panic, exit 101 |
+| Data race (`n += 1` from two threads) | Compiles | Tool-dependent | Rejected (`E0499`) |
+| TOCTOU (check path, swap, open) | Compiles; reads the swapped file | ASan silent | Compiles; same wrong file |
+| Bad FFI length / `unsafe` lie | Possible | Not solved | Possible (Level 2–3) |
+| Logic / ignored `Result` | Possible | Not solved | Possible |
 
-Those are different questions.
+Evidence is below. Three different index stories, say them once:
+
+1. **Constant index rustc can see** → compile-time rejection. No binary.
+2. **Runtime index** → rustc emits a bounds check → **panic** (defined). Not C undefined behavior.
+3. **`unsafe { *v.get_unchecked(i) }`** → you hold the proof. Broken invariant is UB.
 
 ## Table of Contents
 
 - [The short answer](#the-short-answer)
 - [Three levels of Rust safety](#three-levels-of-rust-safety)
 - [What the borrow checker actually proves](#what-the-borrow-checker-actually-proves)
-- [What “memory safe” means here](#what-memory-safe-means-here)
 - [The same bug in C, C++, and Rust](#the-same-bug-in-c-c-and-rust)
-- [What Rust guarantees](#what-rust-guarantees)
-- [Memory safety is not undefined behavior](#memory-safety-is-not-undefined-behavior)
 - [Data races](#data-races)
-- [Safety is not correctness](#safety-is-not-correctness)
 - [What I compiled](#what-i-compiled)
-- [C++23, sanitizers, Boost, crates](#c23-sanitizers-boost-crates)
-- [The real difference is the default](#the-real-difference-is-the-default)
+- [C++23 and sanitizers](#c23-and-sanitizers)
 - [`unsafe` is a proof boundary](#unsafe-is-a-proof-boundary)
-- [Libraries and C code](#libraries-and-c-code)
-- [A real CVE, two ways](#a-real-cve-two-ways)
 - [From borrow checking to LLVM](#from-borrow-checking-to-llvm)
 - [A 2026 research paper](#a-2026-research-paper)
 - [Bug #25860, which I compiled](#bug-25860-which-i-compiled)
@@ -129,50 +122,7 @@ Those are different questions.
 
 ## The short answer
 
-**Safe Rust** (code with no `unsafe` keyword) really does stop many memory bugs that C and C++ still allow. C and C++ can catch some of the same bugs with [AddressSanitizer](https://github.com/google/sanitizers/wiki/AddressSanitizer) / [UBSan](https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html). Those flags are extra. rustc’s check on the examples below is the default.
-
-The argument I hear is real:
-
-- C and C++ still have memory bugs
-- so they need a **stricter compiler**, or **language features** that make those bugs harder to type
-
-What each side actually offers:
-
-- **Rust:** both. Language rules cover two things rustc checks by **default**:
-  - **borrow checking**: who owns this memory, and whether a pointer to it is still valid
-  - **index checking**: the array has 4 slots; writing slot 10 is an error
-- **C++:** 
-      - language features you can pick: [`std::unique_ptr`](https://en.cppreference.com/w/cpp/memory/unique_ptr), [`std::span`](https://en.cppreference.com/w/cpp/container/span), [`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at). 
-      - Plus a stricter compiler you can turn on: [ASan](https://github.com/google/sanitizers/wiki/AddressSanitizer) / [UBSan](https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html).
-
-:::tip **The catch is the default.** 
-In `C` and `C++`, writing beyond the length of an array can still compile, but it may cause a `memory bug at runtime`.
-
-In `Rust`, the `compiler` usually catches this during compilation, so the program does not smash memory at runtime.
-:::
-
-A stricter compiler and new types do not delete human error. They move it. Split who is typing:
-
-- **C/C++ app developer**: the safer types exist, but they do not have to use them. They can still:
-  - index with `v[i]` instead of `v.at(i)` (no check)
-  - use `new` / `delete` instead of `unique_ptr` (easy to free too soon)
-  - `free(p)` then `printf("%s", p)` (use memory after it is gone)
-  - write `a[10]` on an array of size 4 (past the end)
-- **Rust app developer**: can write [`unsafe`](https://doc.rust-lang.org/book/ch19-01-unsafe-rust.html), lie to the type system, or pass a bad length into C
-- **gcc / g++ / clang developer**: can miss a warning, ship bad codegen, or an optimizer bug
-- **rustc developer**: can ship a [soundness bug](https://conf.researchr.org/details/issta-2026/issta-2026-research-papers/129/Rust-s-Type-Checker-Implementation-is-Unsound-An-Empirical-Study-on-Soundness-Bugs-i) (accept code they should reject)
-
-Same species. Features only help if the app developer uses the safe default (Rust) or the safe API (C++ `v.at(i)`, not `v[i]`).
-
-The useful question is not who is smarter. It is **what each language gives you to find the mess**:
-
-- default rustc: language rules on
-- default gcc / g++ / clang: those rules off
-- C++ features you choose: `at()`, `span`, smart pointers
-- sanitizers: if you pass the flag and run that path
-- [Miri](https://github.com/rust-lang/miri): after rustc already said ok, for rustc holes
-
-Let’s look at examples I compiled with rustc 1.93.1, gcc/g++ 13.3, and **clang/clang++ 18.1.3**. Full output is in [What I compiled](#what-i-compiled) and [C++23, sanitizers, Boost, crates](#c23-sanitizers-boost-crates).
+The table above is the claim. These three programs are the evidence. Toolchains: rustc 1.93.1, gcc/g++ 13.3, clang/clang++ 18.1.3. Full logs: [What I compiled](#what-i-compiled).
 
 **Example 1.** This function makes a `String` on the stack, then tries to hand a pointer to it back to the caller:
 
@@ -326,88 +276,33 @@ still running  a[0]=0  flag=42
 
 UBSan **printed** the same “index out of bounds” story Rust panics with. Then the program **kept running** and `flag` was still smashed. Default UBSan recovers. ASan did not stop this one: `a[4]` is the next field in the same `struct`, an intra-object overflow sanitizers often miss.
 
-If I add `-fno-sanitize-recover=undefined`, UBSan aborts and does not print `still running`. That flag is extra, like ASan is extra. Rust’s panic on `a[i]` needed no extra flag.
+If I add `-fno-sanitize-recover=undefined`, UBSan aborts and does not print `still running`. That flag is extra. Rust’s panic on `a[i]` needed no extra flag.
 
-**What each side actually gives you**
-
-| Where the human erred | What C/C++ gave me | What Rust gave me |
-|---|---|---|
-| Safe-looking UAF / constant overflow | Binary, unless I add ASan/UBSan and run that path | rustc error, no binary |
-| Runtime `a[i]` too big | Default: smash and continue. Sanitizer: maybe a message; maybe still continue; maybe miss | Panic, default, debug and `-O` |
-| `unsafe` / FFI / “trust me” | Same as C: you are on your own | rustc trusts you. [Miri](https://github.com/rust-lang/miri) can check **if** you run it |
-| rustc itself wrong | (n/a) | ISSTA 2026: rustc accepted code it should reject. Miri after the fact |
-
-So: sanitizers can report what Rust reports. They are a tool you turn on. Safe Rust is a default. That is the real difference, not “Rust programmers never err.” They do. `unsafe` is that err. The language still marks the hole (`unsafe`) and still panics in the safe subset. C does not mark `a[i] = 42` as unsafe, and the default `a[i]` does not panic.
-
-Rust does **not** magically stop:
-
-- logic bugs (the program does the wrong thing)
-- file races (check a path, then someone changes the file)
-- mistakes when talking to C
-- bugs **inside rustc itself**
-
-A 2026 ISSTA paper, [Rust's Type Checker Implementation is Unsound](https://conf.researchr.org/details/issta-2026/issta-2026-research-papers/129/Rust-s-Type-Checker-Implementation-is-Unsound-An-Empirical-Study-on-Soundness-Bugs-i) (Sim, Ryu, Hong; artifact on [Zenodo](https://doi.org/10.5281/zenodo.20698055)), counted rustc bugs where the compiler said “ok” to code it should have rejected. [Miri](https://github.com/rust-lang/miri) (a Rust checker) can catch some of those **after** rustc already accepted the code. That is Rust’s sanitizer-shaped answer for compiler holes: opt-in, after compile.
-
-Big companies use Rust because it moves one class of bugs to compile time. That is useful. The compiler is still software. Software has bugs.
+Sanitizers can name the same bugs. They are a flag you pass and a path you must run. Safe Rust’s reject/panic is the default. C does not mark `a[i] = 42` as `unsafe`. rustc bugs and FFI still sit outside that default; those sections come later.
 
 ## Three levels of Rust safety
 
-The slide says “Rust.” That is three different products glued together.
+The slide says “Rust.” That is several products glued together.
 
-**Level 1: safe Rust.** No `unsafe` in *your* function. rustc checks who owns the memory, how long a pointer is valid, and (for `a[i]`) whether the index fits. That is the claim people mean.
+**Level 1: safe Rust.** No `unsafe` in *your* function. rustc checks ownership, lifetimes, aliases, and (for `a[i]`) whether the index fits.
 
-**Level 2: `unsafe`.** You told rustc to trust you. The type still looks safe to callers. The proof is now a human.
+**Level 2: `unsafe`.** You told rustc to trust you. Callers still see a safe type. The proof is a human.
 
-**Level 3: FFI + the toolchain.** C libraries, ABI, file descriptors, `mmap`, rustc itself, LLVM. The language rules stop at the `extern "C"` door. They also stop if rustc is wrong.
+**Level 3: FFI + the toolchain.** C libraries, ABI, file descriptors, `mmap`, rustc itself, LLVM. Language rules stop at `extern "C"`. They also stop if rustc is wrong.
 
-```text
-             Rust safety
-                  |
-       +----------+----------+
-       |          |          |
-   Safe Rust    unsafe    FFI / toolchain
-       |          |          |
-  ownership    you hold    C, ABI,
-  borrowing    the proof   rustc, LLVM
-  index checks
-```
+### Where the language guarantee ends
 
-The rest of this article is that picture filled in with programs.
+This is the compiler article’s spine. **Memory-safety as a language model** is not the same as **an implementation bug in rustc.**
 
-Think of a running binary as trust boundaries. The guarantee is strongest at the top.
+1. **Safe Rust** — ownership, borrows, bounds, data-race rules (if rustc is sound).
+2. **`unsafe`** — you assume the invariant.
+3. **FFI** — rustc trusts C lengths, pointers, and ABI.
+4. **Library implementation** — `std` and crates contain `unsafe`; `Cargo.lock` is in the TCB.
+5. **rustc** — a soundness bug accepts code the language forbids. That is not “Rust lied”; the *implementation* did.
+6. **LLVM** — optimizes IR it was given (`noalias` on a lie is still “correct” LLVM).
+7. **OS / hardware** — TOCTOU, `mmap`, permissions, cosmic rays.
 
-```text
-                  APPLICATION
-                       |
-                       v
-                +-------------+
-                |  Safe Rust  |
-                +-------------+
-                       |
-              borrow / type checks
-                       |
-                       v
-                +-------------+
-                |    unsafe   |
-                +-------------+
-                       |
-                programmer proof
-                       |
-                       v
-                +-------------+
-                |     FFI     |
-                +-------------+
-                       |
-                 C / ABI / OS
-                       |
-                       v
-                +-------------+
-                |    LLVM     |
-                +-------------+
-                       |
-                       v
-                     Hardware
-```
+The rest of the article fills that list with programs.
 
 ## What the borrow checker actually proves
 
@@ -448,47 +343,7 @@ I compiled that shape as [Example 1](#the-short-answer) (`&s` returned from the 
 
 ASan asks: “did this **run** access dead memory?” The borrow checker asks: “can this program even **name** that relationship?” Sanitizer: observe an execution. Borrow checker: reject the program.
 
-## What “memory safe” means here
-
-**Memory safety** means: the program only reads and writes memory it is allowed to use, and only while that memory is still alive. Two threads should not write the same memory at the same time with no lock.
-
-It does **not** mean “the program is correct.” A program can be memory-safe and still delete the wrong file.
-
-Simple names:
-
-| Name | Plain meaning |
-|---|---|
-| Use-after-free (UAF) | Use memory after you freed it |
-| Buffer overflow | Write past the end of an array |
-| Double free | Free the same memory twice |
-| Data race | Two threads touch the same memory in a bad way |
-| Null | Use a pointer that is empty |
-| Uninit | Read memory you never set |
-| TOCTOU | Check a file, then it changes before you use it |
-| FFI | Rust calling C (or C calling Rust) |
-| Soundness bug | The compiler accepts code it should reject |
-
-| Kind of bug | Safe Rust | `unsafe` or C FFI | C / C++ |
-|---|---|---|---|
-| UAF, overflow, double-free, data race, null, uninit | Usually stopped | Possible | Possible |
-| Integer wrap (numbers too big) | Debug: panic. Release: wrap. Not the same as C “undefined” smash | Same | Often dangerous |
-| TOCTOU, logic bugs, out of memory | Not stopped | Not stopped | Not stopped |
-| Bad C API / compiler bug | Not stopped | Possible | Possible |
-
-If you write `slice[i]` and `i` is too big, **safe Rust panics** (the program stops). That is the *safe* failure. In C the same index often corrupts memory and keeps running. [Example 3](#the-short-answer) is that test: Rust `./slice_i_rs 4` panics (exit 101). gcc `./slice_i_c 4` prints `still running` and `flag` changed from 7 to 42.
-
-One table for the experiments above (safe Rust, **default** C/C++ build, no sanitizer):
-
-| Bug / property | C | C++ | Safe Rust |
-|---|---|---|---|
-| Out-of-bounds **constant** index (`a[10]` on size 4) | Compiles (gcc silent; clang warns, still links) | Compiles | Compile error |
-| Out-of-bounds **runtime** index | Undefined behavior; my run smashed a neighbor `flag` | Same with `span[i]` | Panic; process stops |
-| Use-after-free | Possible; gcc may warn | Possible; `string_view` was silent | Ownership: no binary |
-| Data race | Possible | Possible | Prevented in safe code |
-| Null dereference | Possible | Possible | `Option` / references, not raw null |
-| Manual `free` / `delete` | Yes | Yes | Usually unnecessary (`Box` / `Vec` drop it) |
-
-That is the takeaway. Sanitizers and `vector::at` move C++ closer to the right-hand column. They are not the default.
+Safe `v[100]` on a length-3 `Vec` is **not** C undefined behavior. rustc emits a bounds check; miss → **panic** (defined stop). C `v[100]` on `int v[3]` is UB: the optimizer may assume it never happens. `unsafe` is the second Rust path: broken contract → UB.
 
 ## The same bug in C, C++, and Rust
 
@@ -543,42 +398,6 @@ error[E0382]: use of moved value: `p`
 
 The longer `String` / `string_view` demos in [What I compiled](#what-i-compiled) are the same rule with more bytes.
 
-## What Rust guarantees
-
-Rust’s memory-safety claim applies to **safe Rust**, if rustc is sound, and if you did not smuggle a lie through `unsafe` or C. It does **not** mean every Rust program is free of bugs.
-
-**Safe Rust is built to stop**
-
-- use-after-free, double-free, dangling references
-- out-of-bounds access (compile error if rustc can see it; panic if `i` is a variable)
-- data races (two threads, same memory, no lock, at least one write)
-- using `null` as a value: you use `Option` instead
-
-**Safe Rust does not automatically stop**
-
-- logic bugs (wrong algorithm, wrong result)
-- races that are **not** data races (TOCTOU, check-then-act on a path)
-- wrong permissions, bad input, denial of service (panic / OOM still “stops,” still a bug)
-- wrong FFI contracts
-- bugs **inside** `unsafe`
-- bugs in rustc or LLVM
-
-## Memory safety is not undefined behavior
-
-These get mixed. They are cousins, not twins.
-
-Safe Rust `v[100]` on a length-3 `Vec` is **not** an undefined access. rustc emits a bounds check. Index does not fit: **panic**. The language still has a defined meaning: stop.
-
-C `v[100]` on `int v[3]`: the language does **not** define that as a normal out-of-range read. The compiler may assume valid programs never do it. That is extra freedom for the optimizer, including deleting branches a human thought were live. “Undefined” is not “it crashes.” It is “the rest of the program no longer has the usual rules.”
-
-```text
-Safe Rust: invalid index  ->  panic (defined)
-Unsafe Rust: broken contract  ->  undefined behavior
-C / C++: many bugs are UB from the first bad access
-```
-
-`unsafe` is that second path. Not “weird syntax.” A hole in the proof.
-
 ## Data races
 
 Memory safety is also threads. I compiled this:
@@ -601,43 +420,7 @@ No binary. Two closures both want `&mut n`. rustc refuses.
 
 The C++ cousin `int counter = 0; void worker() { counter++; }` compiled with g++ and clang++ 18, `-Wall -Wextra`, exit 0. Two threads on that `worker` is a data race. `counter++` is not one machine step: load, add, store. Both threads can store the same old value.
 
-Safe Rust wants `Arc<Mutex<i32>>` or an `AtomicUsize`. That is not “concurrent programs are correct.” You can still deadlock, starve, lock in the wrong order, or race on **files**. The type system only blocks **unsynchronized conflicting memory access** in safe code.
-
-## Safety is not correctness
-
-```text
-Memory safe
-    |
-    v
-No use-after-free
-No dangling pointer
-No out-of-bounds write in safe code
-    |
-    v
-BUT the program can still
-    |
-    v
-wrong algorithm
-wrong file / permissions
-wrong protocol
-TOCTOU
-ignored Result
-DoS (panic loop, OOM)
-```
-
-uutils is that picture in production: overflow and UAF got much harder. File races, `.ok()`, and C wrappers remained. Memory safety is a floor. It is not the building.
-
-I used to think “the borrow checker is the whole story.” Then I searched a real crate for `unsafe`. The hole can be in your `unsafe` block, in a library, in C, or in rustc. The layer above can still look fine.
-
-```mermaid
-flowchart TB
-    P[Your program] --> S[Safe Rust]
-    S --> BC[Compiler checks]
-    BC --> RC[Is rustc itself correct?]
-    RC --> DEP[Libraries + unsafe]
-    DEP --> FFI[C / OS]
-    FFI --> HW[Hardware]
-```
+Safe Rust wants `Arc<Mutex<i32>>` or an `AtomicUsize`. Deadlock, starvation, and **file** races are still possible. The type system only blocks **unsynchronized conflicting memory access** in safe code.
 
 ## What I compiled
 
@@ -991,124 +774,46 @@ use: read "secret"
   </TabItem>
 </Tabs>
 
-In the real world the swap is another process in the gap between check and use, not `rename` in the same `main`. Same hole. The fix is not a smarter rustc. It is: open **once**, then `fstat` / operate on the **file descriptor**, or `O_NOFOLLOW`, so the name is not looked up twice.
+Rust can compile the program, ASan can stay silent, and the program can still use the wrong file. Memory safety is not general security.
 
-Canonical paid [Zellic](https://github.com/Zellic/publications) to audit Ubuntu’s Rust coreutils ([uutils](https://github.com/uutils/coreutils)). Write-up: [An update on rust-coreutils](https://discourse.ubuntu.com/t/an-update-on-rust-coreutils/80773) (22 Apr 2026). Report: [uutils coreutils: Zellic Audit Report](https://github.com/Zellic/publications/blob/master/uutils%20coreutils%20-%20Zellic%20Audit%20Report.pdf). CVE list: [oss-security](https://www.openwall.com/lists/oss-security/2026/05/02/2). Example: [CVE-2026-35359](https://www.openwall.com/lists/oss-security/2026/05/02/2): `cp` checks a path, then opens it without `O_NOFOLLOW`; an attacker can swap in a symlink. Ubuntu 26.04 still ships GNU `cp` / `mv` / `rm` because those races were still open.
+The production cousin is [CVE-2026-35359](https://www.openwall.com/lists/oss-security/2026/05/02/2) in Ubuntu’s Rust [uutils](https://github.com/uutils/coreutils) `cp`: check a path, open without `O_NOFOLLOW`, swap a symlink. Canonical / [Zellic](https://github.com/Zellic/publications/blob/master/uutils%20coreutils%20-%20Zellic%20Audit%20Report.pdf) found mostly file races and ignored errors, not a pile of UAF. GNU still shipped a heap overflow: [CVE-2026-56392](https://osv.dev/vulnerability/CVE-2026-56392). Different class, both real. uutils `dd` [CVE-2026-35344](https://github.com/advisories/GHSA-wh8p-h9hw-x2mc) hid a truncate failure with `.ok()`: memory fine, program wrong.
 
-GNU coreutils still has **memory** bugs too. [CVE-2026-56392](https://osv.dev/vulnerability/CVE-2026-56392) (`unexpand`): integer wrap when sizing a buffer, then a heap overflow. [CERT Polska](https://cert.pl/en/posts/2026/07/CVE-2026-56391/) also lists [CVE-2026-56391](https://cert.pl/en/posts/2026/07/CVE-2026-56391/) (out-of-bounds read). So: uutils got TOCTOU CVEs; GNU still got overflow CVEs. Different class, both real. My test above is the TOCTOU class: rustc green, ASan green, wrong file.
+Fix for the experiment: open **once**, then `fstat` / operate on the **file descriptor**, or `O_NOFOLLOW`.
 
 ### 5. Talking to C
 
-When Rust calls C (`extern "C"`), rustc trusts the C side. That is [FFI](https://doc.rust-lang.org/nomicon/ffi.html) (foreign function interface). The language rules: [external blocks](https://doc.rust-lang.org/reference/items/external-blocks.html). Wrong length. A null pointer that the C docs call “success.” A memory map that another process shrinks. That is not the borrow checker failing. That is a contract with C. If you then do `from_raw_parts(ptr, len)`, rustc never measured `len`.
+When Rust calls C (`extern "C"`), rustc trusts the C side ([FFI](https://doc.rust-lang.org/nomicon/ffi.html)). Wrong length, a “success” null, `from_raw_parts(ptr, len)`: rustc never measured `len`. Tests 1–2 are compile-time reject. Test 3 is runtime panic. Tests 4–5 are where the proof stops.
 
-If a talk only shows tests 1 and 2, they showed the *compile-time* claim. Test 3 is the *run-time* panic. Tests 4 and 5 are the rest of the story.
+Panic / OOM are still bugs. They are not [`strcpy`](https://en.cppreference.com/w/c/string/byte/strcpy) UB. Safe indexing is not on the [UB list](https://doc.rust-lang.org/reference/behavior-considered-undefined.html); it panics.
 
-People also point at “out of memory, process dies” or “program panics” and say Rust is not safe. Read the [panic docs](https://doc.rust-lang.org/book/ch09-01-unrecoverable-errors-with-panic.html). A panic unwinds or aborts. Allocation failure calls [`handle_alloc_error`](https://doc.rust-lang.org/std/alloc/fn.handle_alloc_error.html) (usually abort). Those are still bugs. They are not [`strcpy`](https://en.cppreference.com/w/c/string/byte/strcpy) past a buffer. `strcpy` is [undefined behavior](https://en.cppreference.com/w/c/language/behavior): the program may keep running on smashed memory. Panic stops. Different class. The [Rust reference](https://doc.rust-lang.org/reference/behavior-considered-undefined.html) lists what counts as UB in unsafe code. Safe indexing is not on that list; it panics instead.
+## C++23 and sanitizers
 
-## C++23, sanitizers, Boost, crates
+Default C++ still lets you `new`/`delete` and `v[i]`. C++ also has tools. I re-ran the bugs with **C++23**, `std::span`, `std::vector`, and [ASan](https://github.com/google/sanitizers/wiki/AddressSanitizer) (`g++` 13.3 / `clang++` 18.1.3, `-std=c++23`).
 
-The first tests used C arrays and `new`/`delete`. That is a fair “default C++ still lets you” demo. It is not a fair “C++ has no tools” demo. So I ran the same bugs again with **C++23**, **std::span**, **std::vector**, and [AddressSanitizer](https://github.com/google/sanitizers/wiki/AddressSanitizer). Compilers: **g++ 13.3** and **clang++ 18.1.3**, `-std=c++23`. Rust: **rustc 1.93.1**.
-
-**What C++23 did not change.** `std::span` is a pointer plus a length, like a Rust slice type, but `span[i]` does **not** check `i` in the default operator. I compiled this:
-
-```cpp
-#include <iostream>
-#include <span>
-#include <vector>
-int main(int argc, char** argv) {
-    std::vector<int> v{0, 0, 0, 0};
-    std::span<int> s = v;
-    int i = argc > 1 ? std::stoi(argv[1]) : 4;
-    s[i] = 42;
-    std::cout << "still running  s[0]=" << s[0] << "\n";
-}
-```
+`span[i]` does **not** check `i`. Same silent write past a vector of length 4:
 
 ```text
 $ g++ -std=c++23 -O0 -Wall -Wextra cxx23_span.cpp -o cxx23_span
-$ clang++ -std=c++23 -O0 -Wall -Wextra cxx23_span.cpp -o cxx23_span_clang
-# both: exit 0, no warning
 $ ./cxx23_span 4
 still running  s[0]=0
-$ ./cxx23_span_clang 4
-still running  s[0]=0 v.size()=4
-# exit 0
-```
-
-New standard. Same silent write past the vector. C++23 is not a borrow checker.
-
-**What a sanitizer did change.** Same source, extra flag:
-
-```text
+# clang++ 18: same, exit 0
 $ g++ -std=c++23 -O0 -Wall -Wextra -fsanitize=address cxx23_span.cpp -o cxx23_span_asan
 $ ./cxx23_span_asan 4
 ERROR: AddressSanitizer: heap-buffer-overflow
-WRITE of size 4
-SUMMARY: AddressSanitizer: heap-buffer-overflow ... in main
-# abort, exit 1
-
-$ clang++ -std=c++23 -O0 -Wall -Wextra -fsanitize=address cxx23_span.cpp -o cxx23_span_clang_asan
-$ ./cxx23_span_clang_asan 4
-ERROR: AddressSanitizer: heap-buffer-overflow
-SUMMARY: AddressSanitizer: heap-buffer-overflow ... in main
-```
-
-The `string_view` after `delete` program from test 1, still C++23:
-
-```text
-$ g++ -std=c++23 -O0 -Wall -Wextra cxx23_uaf.cpp -o cxx23_uaf
-$ ./cxx23_uaf
-secret
-# exit 0: printed freed memory
-
-$ g++ -std=c++23 -O0 -Wall -Wextra -fsanitize=address cxx23_uaf.cpp -o cxx23_uaf_asan
-$ ./cxx23_uaf_asan
-ERROR: AddressSanitizer: heap-use-after-free
-SUMMARY: AddressSanitizer: heap-use-after-free ... fwrite
-# abort, exit 1
-```
-
-So: **C++23 + ASan caught both bugs at run time.** That is real. It is also optional. You must pass `-fsanitize=address`, take the slowdown, and **run the path**. ASan does not run on code you never execute. rustc’s check on `&s` and on `a[10]` happens at compile time with no extra flag. The variable-index panic happens on every run of that binary, debug or `-O`.
-
-**C++ already has a panic-shaped API.** [`std::vector::at`](https://en.cppreference.com/w/cpp/container/vector/at) throws:
-
-```cpp
-v.at(i) = 42;   // i == 4
-```
-
-```text
-$ g++ -std=c++23 -O0 -Wall -Wextra cxx23_at.cpp -o cxx23_at
-$ ./cxx23_at 4
-terminate called after throwing an instance of 'std::out_of_range'
-  what():  vector::_M_range_check: __n (which is 4) >= this->size() (which is 4)
 # abort
 ```
 
-That is closer to Rust `v[i]`. The catch: the **usual** C++ index is `v[i]` / `span[i]`, which does not throw. Rust’s usual index is the checked one. Defaults matter.
+C++23 `string_view` after `delete` printed `secret` (exit 0). With ASan: `heap-use-after-free`, abort.
 
-**Boost vs crates.** C++ spent years putting Boost into `std`. [`boost::optional`](https://www.boost.org/doc/libs/release/libs/optional/doc/html/index.html) became [`std::optional`](https://en.cppreference.com/w/cpp/utility/optional). Boost.Filesystem became [`std::filesystem`](https://en.cppreference.com/w/cpp/filesystem). Smart pointers, `span`, `string_view`: same story. This machine has Boost headers; I did not need them for the tests above because C++23 already has those types. What Boost still is: the leftover kitchen sink ([Asio](https://www.boost.org/doc/libs/release/doc/html/boost_asio.html), Spirit, uBLAS, …) until `std` or another library eats it.
+C++23 + ASan caught both **at run time**, if you pass the flag and **run the path**. rustc’s check on `&s` / `a[10]` is compile time with no extra flag. The variable-index panic is in every binary, debug or `-O`.
 
-Rust does **not** need a Boost-the-project. [`std`](https://doc.rust-lang.org/std/) already has `Option`, `Result`, `Box` / `Rc` / `Arc`, `Vec`, slices, [`std::fs`](https://doc.rust-lang.org/std/fs/). The Boost-sized rest lives on [crates.io](https://crates.io/): [Tokio](https://tokio.rs/) is Asio, [serde](https://serde.rs/) is serialization, [nix](https://docs.rs/nix) is POSIX, [nom](https://docs.rs/nom) is parsers. Cargo pulls one version and records it in `Cargo.lock`. That is why “is there a Boost for Rust?” is the wrong question. There is an ecosystem. The cost is the same cost Boost always had: you must trust the crate, same as you must trust a Boost module or a C++ library.
+[`vector::at`](https://en.cppreference.com/w/cpp/container/vector/at) throws `out_of_range` — closer to Rust `v[i]`. The usual C++ spelling is still unchecked `v[i]` / `span[i]`. Rust’s usual spelling is the checked one. Unchecked Rust is `unsafe { *v.get_unchecked(i) }`.
 
-None of that makes `span[i]` check bounds by default. Libraries do not replace the compiler’s default.
-
-## The real difference is the default
-
-C++ is not empty of safety tools. RAII, `unique_ptr`, `span`, `vector::at`, `optional`, atomics, sanitizers. The hole is there is **no one mandatory model**. `v[i]` is unchecked. `v.at(i)` checks. I compiled both.
-
-Rust’s normal `v[i]` is the checked one. The unchecked spelling is a different API and sits in `unsafe`:
-
-```rust
-unsafe { *v.get_unchecked(i) }
-```
-
-The useful question is not “does C++ have a safe API?” It does. It is: **what happens if the programmer forgets?** That is the default.
+Boost became a lot of `std`; the rest of the kitchen sink is crates.io on the Rust side. Trusting a crate is the same problem as trusting Boost. Neither makes `span[i]` check bounds by default.
 
 ## `unsafe` is a proof boundary
 
-`unsafe` means: “compiler, trust me here.” It is not a confession that Rust failed. It is the door out of the proof.
-
-A common line: “Rust has `unsafe`, so it is C.” Too simple. The point is the hole is **named**, and you can keep it small.
+`unsafe` means: “compiler, trust me here.” The hole is **named**, so you can keep it small. Callers stay in safe Rust; inside, you own the invariant.
 
 ```rust
 pub fn first_byte(data: &[u8]) -> u8 {
@@ -1116,11 +821,7 @@ pub fn first_byte(data: &[u8]) -> u8 {
 }
 ```
 
-Callers stay in safe Rust. Inside, you own the invariant (`data` not empty). Ten lines of `unsafe` under a thousand lines of safe code is the design. Five thousand lines of `transmute`, raw pointers, and FFI is C with extra steps.
-
-Counting `unsafe` blocks is not a science score. The question is: **what invariant does this block establish, and who relies on it?**
-
-This is the first trick people send:
+Ten lines of `unsafe` under a thousand lines of safe code is the design. Five thousand lines of `transmute` and FFI is C with extra steps. Count invariants, not blocks.
 
 ```rust
 pub fn as_static(s: &str) -> &'static str {
@@ -1128,122 +829,23 @@ pub fn as_static(s: &str) -> &'static str {
 }
 ```
 
-`main` has no `unsafe`. The program can still use memory after it is freed. Why? rustc checks the **function type**, not the proof inside `unsafe`. `std` uses `unsafe` too, on purpose: hide the dangerous bit. The bad case is when that hiding is a lie.
+`main` has no `unsafe`. The program can still use-after-free. rustc checks the **function type**, not the proof inside `unsafe`. `std` hides dangerous bits on purpose. A lie in that hiding is still a lie.
 
-## Libraries and C code
-
-“Our crate has no `unsafe`” is not the full story. Your `Cargo.lock` may pull in other crates that do. `cargo audit` finds **known** security reports. It does not prove every library is correct.
-
-Calling C is the same idea with a C API instead of a crate name. `from_raw_parts(pointer, length)`: the length came from C. rustc never checked it.
-
-## A real CVE, two ways
-
-**uutils** is GNU coreutils rewritten in Rust (`ls`, `dd`, `cp`, …). Ubuntu 25.10 ships it. Canonical paid Zellic to review it. I want one pair of bugs in the form security people actually use: what happened, why the language allowed it, would **safe** Rust have stopped it, what still goes wrong.
-
-### CVE-2026-56392 (GNU `unexpand`): heap overflow
-
-**What happened.** Tab-stop count times element size wrapped. The allocator got a small buffer. The write loop used the old count. Heap overflow. [OSV](https://osv.dev/vulnerability/CVE-2026-56392). CERT Polska also lists [CVE-2026-56391](https://cert.pl/en/posts/2026/07/CVE-2026-56391/) (out-of-bounds read).
-
-**Why C allowed it.** Integer wrap plus `malloc` plus a write past the allocation is undefined behavior. The type system does not track “this length is the size I allocated.”
-
-**Would safe Rust prevent it?** The overflow-as-smash, usually yes: `Vec` length is the allocation; `v[i]` panics or you use `checked` / saturating math on purpose. A logic error that picks the **wrong** tab list is still possible.
-
-**What could still go wrong in Rust?** Panic as DoS. Wrong output. An `unsafe` wrapper around a C allocator with a length you computed yourself: you are back in C.
-
-### CVE-2026-35344 (uutils `dd`): ignored error
-
-**What happened.** `dd` hid a truncate failure with `.ok()`. [Advisory](https://github.com/advisories/GHSA-wh8p-h9hw-x2mc). The process looked successful. Data was not what the user asked for.
-
-**Why “Rust” allowed it.** This is not a memory bug. `Result` is a value. `.ok()` throws the `Err` away. rustc does not know you needed that truncate.
-
-**Would safe Rust prevent it?** No. Memory stayed fine. The **program** was wrong.
-
-**What could still go wrong?** Same class as every `unwrap` / `.ok()` / ignored `io::Error`. Level 1 does not care.
-
-### CVE-2026-35359 (uutils `cp`): TOCTOU
-
-**What happened.** `cp` checked a path, then opened it without `O_NOFOLLOW`. Swap a symlink in the gap. [oss-security](https://www.openwall.com/lists/oss-security/2026/05/02/2). Ubuntu 26.04 still ships GNU `cp` / `mv` / `rm` for that reason.
-
-**Would safe Rust prevent it?** No. See [the TOCTOU test](#4-file-race-toctou). rustc compiled it. ASan was silent.
-
-Zellic’s public write-up through [Bugs Rust Won’t Catch](https://corrode.dev/blog/bugs-rust-wont-catch/) and Canonical’s [update](https://discourse.ubuntu.com/t/an-update-on-rust-coreutils/80773): mostly file races, permissions, “not the same as GNU,” ignored errors. They did **not** report classic overflow / UAF as the main pile. That is the rewrite working **and** the guarantee being smaller than the slide.
-
-I searched a 2026 tree. About two hundred `unsafe` hits in `src/`. One bad case: a BSD C function can return length 0 and a null pointer. The Rust wrapper only rejected negative length, then built a slice from null. That is Level 3: wrong C check, then `from_raw_parts`.
+“Our crate has no `unsafe`” is incomplete: `Cargo.lock` may pull crates that do. `cargo audit` finds **known** advisories; it does not prove libraries correct.
 
 ## From borrow checking to LLVM
 
-Safe Rust is only as strong as rustc. If rustc **accepts an invalid program**, the Level 1 guarantee does not hold for that program. The language spec said no. The implementation said yes. LLVM then optimizes as if the type were true.
-
-The borrow checker is not the last pass.
+Safe Rust is only as strong as rustc. If rustc **accepts an invalid program**, the language said no and the implementation said yes. LLVM then optimizes as if the type were true. That is a miscompile of the *language*, not a random backend crash.
 
 ```text
-Rust source
-     |
-     v
-AST
-     |
-     v
-HIR
-     |
-     v
-Type checking
-     |
-     v
-Borrow checking
-     |
-     v
-MIR
-     |
-     v
-MIR optimization
-     |
-     v
-LLVM IR
-     |
-     v
-Machine code
+source → AST → HIR → type check → borrow check → MIR → LLVM IR → machine code
 ```
 
-Ownership is checked **before** LLVM. Some of it still shows up in IR. `&mut i32` is not “any C pointer.” For that lifetime, no other conflicting write. rustc can lower that as LLVM `noalias`. The optimizer may delete loads it thinks are impossible.
+Ownership is checked **before** LLVM. `&mut` is not “any C pointer”; rustc can lower it as `noalias`. If rustc **wrongly** emits `&'static`, LLVM may treat that pointer as forever. A hole in lifetime rules is permission for the optimizer.
 
-If the frontend was **wrong**, the optimizer is still “correct” relative to the IR it was given. That is a miscompile of the *language*, not a random backend crash.
+The guarantee is not “the borrow checker is perfect.” It is: **the whole pipeline preserves the language’s safety rules.** Same numbered list as above: language → `unsafe` → FFI → libraries → **rustc** → **LLVM** → OS. ISSTA 2026 and #25860 sit on the rustc step. They are not a gotcha against `Vec`.
 
-```text
-language rules
-     |
-     v
-borrow checking
-     |
-     v
-unsafe contracts
-     |
-     v
-compiler correctness
-     |
-     v
-optimizer correctness
-```
-
-The guarantee is not “the borrow checker is perfect.” It is: **the whole pipeline preserves the language’s safety rules.**
-
-| Layer | What can go wrong |
-|---|---|
-| Parser | Accepts / rejects the wrong syntax |
-| Type checker | Wrong type judgment |
-| Borrow checker | Accepts a bad lifetime or alias |
-| MIR | Bad transform |
-| MIR optimizer | Miscompiles valid Rust |
-| LLVM lowering | Wrong IR |
-| LLVM optimizer | Wrong transform (`noalias` on a lie) |
-| Backend / linker | Wrong instruction or layout |
-
-I used to ignore LLVM `noalias`. Then I saw what happens if rustc **wrongly** says a pointer lives forever (`&'static`). LLVM may treat that pointer as real. **Memory safety** (don’t smash the heap) is not the same as **memory-model rules** (what the optimizer may assume). `&mut` means “only I can write.” If those two stories disagree, even “safe” code can be compiled wrong.
-
-A pointer is not “just a number.” A hole in lifetime rules is permission for the optimizer.
-
-The [pipeline article](/docs/articles/rustc-pipeline-vs-cpp-compilation-pipeline) draws the C++ side next to this.
-
-Question for compiler people: **if rustc incorrectly accepts invalid code, does the safety guarantee still hold?** No. That is why ISSTA 2026 and #25860 sit here. They are not a gotcha against `Vec`. They are a limit on Level 1.
+The [pipeline article](/docs/articles/rustc-pipeline-vs-cpp-compilation-pipeline) draws the C++ side.
 
 ## A 2026 research paper
 
@@ -1349,22 +951,15 @@ I would not write: “Rust makes programs memory safe.” Too broad. I would wri
 
 **Safe Rust moves a large class of memory-safety errors from runtime into compile-time rules. `unsafe`, FFI, compiler bugs, OS interfaces, and logic errors stay outside that guarantee.**
 
-Less marketable. More useful.
+:::tip What exactly does Rust guarantee?
+**In safe code (if rustc is sound), Rust is built to stop:** no use-after-free, no dangling references, no double-free, no data races, bounds-checked indexing, ownership/lifetime consistency.
 
-The engineering question is not “is Rust safe?” It is: **which invariants does rustc enforce for this code, and where does the programmer prove the rest?**
+**It does not guarantee:** correct business logic, race-free filesystem operations, correct FFI contracts, absence of `unsafe` bugs, absence of library / rustc / LLVM bugs, absence of DoS / panic / OOM.
+:::
 
-```text
-Safe Rust: ownership, borrows, lifetimes, bounds, data-race rules
-        -> compiler-enforced
+The interesting difference between Rust and C++ is not whether safety tools exist. It is **what happens when the programmer forgets to use them.**
 
-unsafe / FFI: raw pointers, C lengths, get_unchecked
-        -> you
-
-rustc -> MIR -> LLVM -> backend
-        -> compiler correctness
-```
-
-Rust did not delete the need for correctness. It moved a big piece of it into the type system. That is the achievement.
+Rust did not delete the need for correctness. It moved a big piece of it into the type system. Memory safety is a floor, not the whole building.
 
 ## Limits
 
@@ -1373,6 +968,8 @@ The small C/C++/Rust programs and #25860 were run on rustc 1.93.1, gcc/g++ 13.3,
 C and Rust can live together. People are still the expensive part. Checking more at compile time is a bet that computers got cheaper faster than human attention. I just wanted the extra words on the claim written down.
 
 ## References
+
+Claims in the article point here: rustc soundness and #25860 (2–9); uutils / GNU CVEs and TOCTOU (10–13); ASan, `span`, `at` (14).
 
 1. [Why are some people against the Rust-Lang?](https://users.rust-lang.org/t/why-are-some-people-against-the-rust-lang/93906), May 2023.
 2. [rust-lang/rust#25860](https://github.com/rust-lang/rust/issues/25860).
