@@ -28,6 +28,14 @@ const parallel = {
         },
         {
           type: 'category',
+          label: 'Daily lessons',
+          collapsed: false,
+          items: [
+            'parallel-computing/concurrent-parallel-distributed',
+          ],
+        },
+        {
+          type: 'category',
           label: 'GPU tracks',
           collapsed: false,
           items: [
