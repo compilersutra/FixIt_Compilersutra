@@ -28,6 +28,14 @@ const parallel = {
         },
         {
           type: 'category',
+          label: 'Daily lessons',
+          collapsed: false,
+          items: [
+            'parallel-computing/one-core-made-busier',
+          ],
+        },
+        {
+          type: 'category',
           label: 'GPU tracks',
           collapsed: false,
           items: [
