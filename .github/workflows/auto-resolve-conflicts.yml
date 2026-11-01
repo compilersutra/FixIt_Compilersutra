@@ -1,0 +1,37 @@
+name: Auto Resolve Conflicts
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.login == 'compilersutra'
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch base
+        run: git fetch origin ${{ github.event.pull_request.base.ref }}
+
+      - name: Attempt merge with strategy
+        run: |
+          git merge origin/${{ github.event.pull_request.base.ref }} -X theirs --no-edit || {
+            git add -A
+            git commit -m "Auto-resolve merge conflicts by accepting both changes" --allow-empty || true
+          }
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
