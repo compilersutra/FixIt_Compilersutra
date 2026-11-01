@@ -78,6 +78,8 @@ These pages are not written yet. Each one is linked here when it lands.
 
 ### Pipeline
 
+- Pipeline Hazards (Data, Control, Structural)
+- [Pipeline Stalls and Bubbles](/docs/coa/pipeline-stalls-and-bubbles)
 - [Pipeline Hazards (Data, Control, Structural)](/docs/coa/pipeline-hazards)
 - Pipeline Stalls and Bubbles
 - [Instruction-Level Parallelism (ILP)](/docs/coa/instruction-level-parallelism)
@@ -86,7 +88,7 @@ These pages are not written yet. Each one is linked here when it lands.
 ### Cache, branches, SIMD
 
 - Cache Mapping (Direct, Set-Associative, Fully Associative)
-- Static vs Dynamic Branch Prediction
+- [Static vs Dynamic Branch Prediction](/docs/coa/branch-prediction)
 - Misprediction Penalty
 - SIMD Basics and Vector Registers
 
