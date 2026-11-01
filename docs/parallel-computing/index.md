@@ -78,7 +78,7 @@ OpenMP in this section is the CPU version. Offload to a device is listed with th
 - OpenMP regions, reductions, and loop-carried dependence
 - [OpenMP schedules](openmp-schedules.md)
 - OpenMP tasks and sections
-- C++ atomics and memory order
+- [C++ atomics and memory order](cpp-atomics-and-memory-order.md)
 - C++ parallel algorithms
 - Thread pools, work stealing, and oneTBB
 

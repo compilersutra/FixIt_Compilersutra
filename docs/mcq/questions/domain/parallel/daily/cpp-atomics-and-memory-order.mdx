@@ -1,0 +1,20 @@
+---
+title: "C++ atomics and memory order quiz"
+description: "Five questions for C++ atomics and memory order. Each stem is new."
+---
+
+import { Question } from '../../../../Question';
+
+# C++ atomics and memory order quiz
+
+Lesson: [C++ atomics and memory order](/docs/parallel-computing/cpp-atomics-and-memory-order/)
+
+<Question question="1. What is the default memory ordering used for atomic operations in C++ if none is specified?" options={["std::memory_order_relaxed", "std::memory_order_acquire", "std::memory_order_release", "std::memory_order_seq_cst"]} answer="std::memory_order_seq_cst" />
+
+<Question question="2. Which C++ memory ordering imposes no constraints on surrounding memory reads or writes relative to other threads?" options={["std::memory_order_relaxed", "std::memory_order_acquire", "std::memory_order_release", "std::memory_order_seq_cst"]} answer="std::memory_order_relaxed" />
+
+<Question question="3. Which memory ordering is used on store operations to prevent preceding reads and writes from being reordered after it?" options={["std::memory_order_relaxed", "std::memory_order_acquire", "std::memory_order_release", "std::memory_order_seq_cst"]} answer="std::memory_order_release" />
+
+<Question question="4. What is established when a store-release operation in one thread is read as true by a load-acquire operation in another thread?" options={["A data race", "A synchronizes-with relationship", "A compiler error", "A thread deadlock"]} answer="A synchronizes-with relationship" />
+
+<Question question="5. Why should volatile not be used for thread synchronization in C++?" options={["It is not supported in multithreaded C++ programs", "It causes compiler syntax errors on atomic operations", "It does not provide atomicity, memory barriers, or prevent data races", "It automatically locks all system memory"]} answer="It does not provide atomicity, memory barriers, or prevent data races" />
