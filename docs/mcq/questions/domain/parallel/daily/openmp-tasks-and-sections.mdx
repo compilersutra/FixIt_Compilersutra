@@ -1,0 +1,20 @@
+---
+title: "OpenMP tasks and sections quiz"
+description: "Five questions for OpenMP tasks and sections. Each stem is new."
+---
+
+import { Question } from '../../../../Question';
+
+# OpenMP tasks and sections quiz
+
+Lesson: [OpenMP tasks and sections](/docs/parallel-computing/openmp-tasks-and-sections/)
+
+<Question question="1. Which OpenMP construct explicitly divides work into fixed, statically known blocks at compile time?" options={["sections", "taskwait", "taskgroup", "single"]} answer="sections" />
+
+<Question question="2. What process does the compiler perform to extract the body of an OpenMP task into a synthesized internal function?" options={["Task outlining", "Pointer chasing", "Static mapping", "Domain decomposition"]} answer="Task outlining" />
+
+<Question question="3. Which OpenMP clause ensures that each task receives its own captured copy of a variable at creation time?" options={["firstprivate", "shared", "reduction", "schedule"]} answer="firstprivate" />
+
+<Question question="4. What directive holds a generating thread until all child tasks created by it complete?" options={["#pragma omp taskwait", "#pragma omp barrier", "#pragma omp section", "#pragma omp parallel for"]} answer="#pragma omp taskwait" />
+
+<Question question="5. What is the memory overhead level described for using #pragma omp task compared to static loops?" options={["Medium", "Zero", "Low", "High"]} answer="Medium" />
