@@ -234,6 +234,7 @@ const config = {
             items: [
               { label: 'All Articles', to: '/docs/articles' },
               { label: 'Weekly Problems', to: '/docs/weekly-problems/' },
+              { label: 'CompilerSutra Weekly', href: 'https://aabhinavg1.github.io/compilersutra-weekly/' },
               { label: 'Benchmarks', to: '/docs/articles/gcc_vs_clang_real_benchmarks_2026_reporter' },
               { label: 'Compiler Blog', to: '/docs/compilers/techblog/' },
               { label: 'How-To Guides', to: '/docs/how-about' },
@@ -246,6 +247,11 @@ const config = {
             sidebarId: 'projectSidebar',
             position: 'left',
             label: 'Projects',
+          },
+          {
+            label: 'Weekly',
+            position: 'left',
+            href: 'https://aabhinavg1.github.io/compilersutra-weekly/',
           },
           {
             type: 'dropdown',
@@ -323,6 +329,7 @@ const config = {
               { label: 'WhatsApp Community', href: 'https://chat.whatsapp.com/C5lBzje4CjvLTZBhS0O92x' },
               { label: 'YouTube Channel', href: 'https://www.youtube.com/@compilersutra' },
               { label: 'GitHub', href: 'https://github.com/aabhinavg1/FixIt' },
+              { label: 'CompilerSutra Weekly', href: 'https://aabhinavg1.github.io/compilersutra-weekly/' },
               { label: 'Support Us', to: '/support' },
               { label: 'About Us', href: 'https://www.compilersutra.com/about_us/' },
             ],

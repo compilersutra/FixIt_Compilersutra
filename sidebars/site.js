@@ -137,6 +137,18 @@ const site = {
         },
         {
           type: 'category',
+          label: 'CompilerSutra Weekly',
+          collapsed: true,
+          link: {
+            type: 'doc',
+            id: 'project/compilersutra-weekly/index',
+          },
+          items: [
+            'project/compilersutra-weekly/index',
+          ],
+        },
+        {
+          type: 'category',
           label: 'LLVM Projects',
           collapsed: true,
           link: {
