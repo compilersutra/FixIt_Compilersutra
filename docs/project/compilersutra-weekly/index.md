@@ -11,8 +11,8 @@ displayed_sidebar: projectSidebar
 
 | | |
 | --- | --- |
-| Reports (Pages) | [aabhinavg1.github.io/compilersutra-weekly](https://aabhinavg1.github.io/compilersutra-weekly/) |
-| Source | [github.com/aabhinavg1/compilersutra-weekly](https://github.com/aabhinavg1/compilersutra-weekly) |
+| Reports (Pages) | [compilersutra.github.io/compilersutra-weekly](https://compilersutra.github.io/compilersutra-weekly/) |
+| Source | [github.com/compilersutra/compilersutra-weekly](https://github.com/compilersutra/compilersutra-weekly) |
 
 ## Taxonomy
 
