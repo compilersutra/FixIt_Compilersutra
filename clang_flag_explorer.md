@@ -196,4 +196,47 @@ Gold structural example for this section: the hand-authored `-fomit-frame-pointe
 
 Use empty arrays or omit the field when nothing applies. Do **not** fabricate mappings in bulk JSON. Hand-authored MDX remains the source of truth until a generator consumes this field. Preserve existing option keys and page-generation scripts.
 
+14. Historical research, teaching quality, and QA (shared standard)
+
+Gold teaching + history reference: the hand-authored `-fomit-frame-pointer` page.
+
+### 14.1 Historical research
+
+When a flag article includes version history (recommended for long-lived driver/codegen flags):
+
+- Verify introduction using Git history **and** release tags. An early commit is not automatically the first released version.
+- Prefer Options.td / release notes / Phabricator or GitHub reviews as primary sources.
+- Track only **meaningful** behavior or encoding changes (driver defaults, IR attribute encoding, target-specific defaults). Skip speculative per-release filler.
+- Cite commit hashes, review IDs, and release-note anchors.
+- Separate Clang C/C++ behavior from Flang or other frontends.
+- If the first released version cannot be established, say so explicitly.
+- Never invent historical milestones.
+
+Suggested table (place near defaults / compatibility):
+
+| Clang / LLVM version | Change | Practical impact | Evidence |
+
+### 14.2 Technical correctness reminders
+
+- Separate **driver policy** (`clang -###` → `-mframe-pointer=` / equivalent) from **final asm** (`clang -S`).
+- Defaults are **target- and version-dependent**; never present one host clang as universal.
+- Label claims: Verified experimentally / Verified from source / Documented / Not yet verified.
+- Frame pointers ≠ stack frames ≠ DWARF CFI ≠ `.eh_frame` ≠ exception tables ≠ `-g` debug info.
+- Do not put sanitizer/runtime stages in the mandatory pipeline diagram for non-sanitizer flags.
+- Benchmarks: never convert measurement noise into a performance win; preserve methodology, environment, and limitations.
+
+### 14.3 Teaching quality
+
+- Open with the problem the flag addresses in plain language (assume basic C/C++, not LLVM literacy).
+- One mechanism at a time; short prose then a command or tiny example.
+- Include a copy-paste verification workflow: `--version`, `-###`, `-S -emit-llvm`, `-S`, `llvm-objdump` / `readelf` as appropriate.
+- Avoid marketing language, duplicated sections, and unexplained jargon.
+
+### 14.4 Quality assurance before publish
+
+- Links resolve; Mermaid/MDX valid; `{/* HAND_AUTHORED */}` retained; CTA one-liner intact.
+- Examples name compiler version + target triple + exact command.
+- Site build succeeds for touched pages.
+- Mobile-friendly command wrapping for long lines.
+
 Deliverable: the completed MDX and only necessary tiny component tweaks.
