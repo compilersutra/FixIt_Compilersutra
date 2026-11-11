@@ -2,45 +2,22 @@
 
 Publishes **one beginner concept per day** from the Basic Terminology hub catalog.
 
-## Generate today’s spotlight
+## Local
 
 ```bash
-cd /path/to/FixIt_Compilersutra
 python3 scripts/basic-terminology-bot/generate_daily_term.py
+# or
+bash scripts/basic-terminology-bot/run-all.sh
 ```
 
-Optional:
+## Jenkins (production)
 
-```bash
-python3 scripts/basic-terminology-bot/generate_daily_term.py --date 2026-11-11
-```
+Job: `http://localhost:8080/job/compilersutra-basic-terminology-daily/`
 
-Outputs land in `scripts/basic-terminology-bot/out/`:
+- Cron: `15 8 * * *` (08:15 IST)
+- Pipeline: `/home/aitr/compilersutra/jenkins_pipeline/Jenkinsfile.basic-terminology`
+- Script: `/home/aitr/compilersutra/jenkins_pipeline/scripts/basic-terminology-daily/run-all.sh`
 
-- `daily-YYYY-MM-DD-<topic-id>.md` — always
-- `daily-YYYY-MM-DD-<topic-id>.pdf` — when `fpdf2` is installed
+Keep `catalog.json` in sync with `src/data/basicTerminology/topics.js` (see skill `compilersutra-basic-terminology`).
 
-## Refresh catalog
-
-After editing `src/data/basicTerminology/topics.js`:
-
-```bash
-node --input-type=module -e "
-import fs from 'fs';
-import * as mod from './src/data/basicTerminology/topics.js';
-fs.writeFileSync('scripts/basic-terminology-bot/catalog.json', JSON.stringify({
-  modules: mod.MODULES,
-  topics: mod.TOPICS,
-  learningPath: mod.LEARNING_PATH,
-  hub: mod.HUB_META,
-}, null, 2) + '\n');
-"
-```
-
-## Cron (optional)
-
-```cron
-0 8 * * * cd /path/to/FixIt_Compilersutra && python3 scripts/basic-terminology-bot/generate_daily_term.py >> /tmp/basic-term-bot.log 2>&1
-```
-
-Hub page: https://www.compilersutra.com/docs/basic-terminology/
+Hub: https://www.compilersutra.com/docs/basic-terminology/
